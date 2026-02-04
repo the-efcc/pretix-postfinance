@@ -14,7 +14,9 @@ from decimal import Decimal
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
+    Charge,
     CreationEntityState,
+    CustomersPresence,
     LineItemCreate,
     PaymentMethodConfiguration,
     Refund,
@@ -22,6 +24,8 @@ from postfinancecheckout.models import (
     RefundState,
     RefundType,
     Space,
+    Token,
+    TokenizationMode,
     Transaction,
     TransactionCreate,
     TransactionState,
@@ -37,6 +41,7 @@ from postfinancecheckout.service import (
     PaymentMethodConfigurationsService,
     RefundsService,
     SpacesService,
+    TokensService,
     TransactionsService,
     WebhookEncryptionKeysService,
     WebhookListenersService,
@@ -143,6 +148,7 @@ class PostFinanceClient:
         self._spaces_service = SpacesService(self._configuration)
         self._transactions_service = TransactionsService(self._configuration)
         self._refunds_service = RefundsService(self._configuration)
+        self._tokens_service = TokensService(self._configuration)
         self._webhook_encryption_service = WebhookEncryptionKeysService(self._configuration)
         self._payment_method_configs_service = PaymentMethodConfigurationsService(
             self._configuration
@@ -211,11 +217,15 @@ class PostFinanceClient:
         self,
         currency: str,
         line_items: list[LineItemCreate],
-        success_url: str,
-        failed_url: str,
+        success_url: str | None = None,
+        failed_url: str | None = None,
         merchant_reference: str | None = None,
         language: str | None = None,
         allowed_payment_method_configurations: list[int] | None = None,
+        tokenization_mode: TokenizationMode | None = None,
+        token: int | None = None,
+        customers_presence: CustomersPresence | None = None,
+        customer_id: str | None = None,
         customer_email_address: str | None = None,
     ) -> Transaction:
         """
@@ -224,13 +234,22 @@ class PostFinanceClient:
         Args:
             currency: The three-letter currency code (e.g., 'CHF', 'EUR').
             line_items: List of LineItemCreate objects for the transaction.
-            success_url: URL to redirect to on successful payment.
-            failed_url: URL to redirect to on failed/cancelled payment.
+            success_url: URL to redirect to on successful payment. Required for
+                interactive payments, optional for token-based charges.
+            failed_url: URL to redirect to on failed/cancelled payment. Required for
+                interactive payments, optional for token-based charges.
             merchant_reference: Optional merchant reference for this transaction.
             language: Optional language code for the payment page (e.g., 'en-US').
             allowed_payment_method_configurations: Optional list of payment method
                 configuration IDs to restrict which payment methods are available.
                 If not provided, all configured payment methods are available.
+            tokenization_mode: Optional tokenization mode. Use FORCE_CREATION for
+                first installment payment to create a reusable token.
+            token: Optional token ID to charge an existing payment method.
+                Used for subsequent installment payments.
+            customers_presence: Optional indicator of customer presence. Use
+                NOT_PRESENT for server-to-server recurring/installment charges.
+            customer_id: Optional customer ID in the external system.
             customer_email_address: Optional customer email to prefill on the payment page.
 
         Returns:
@@ -247,6 +266,10 @@ class PostFinanceClient:
             merchantReference=merchant_reference,
             language=language,
             allowedPaymentMethodConfigurations=allowed_payment_method_configurations,
+            tokenizationMode=tokenization_mode,
+            token=token,
+            customersPresence=customers_presence,
+            customerId=customer_id,
             customerEmailAddress=customer_email_address,
         )
 
@@ -322,6 +345,42 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting transaction: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def process_with_token(self, transaction_id: int) -> Charge:
+        """
+        Process a transaction using the token attached to it.
+
+        This is used for recurring/installment payments where a token was
+        previously created and stored. The transaction must have been created
+        with the token ID set.
+
+        Args:
+            transaction_id: The ID of the transaction to process.
+
+        Returns:
+            The Charge object with the result. Check charge.state for:
+            - ChargeState.SUCCESSFUL: Payment succeeded
+            - ChargeState.FAILED: Payment failed
+            - ChargeState.PENDING: Payment is still processing
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            return self._transactions_service.post_payment_transactions_id_process_with_token(
+                id=transaction_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error processing with token: %s", e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error processing with token: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def refund_transaction(
@@ -705,3 +764,59 @@ class PostFinanceClient:
             logger.info("Created refund listener with ID %s", refund_listener.id)
 
         return result
+
+    def get_token(self, token_id: int) -> Token:
+        """
+        Get a payment token by ID.
+
+        Args:
+            token_id: The ID of the token to retrieve.
+
+        Returns:
+            The Token object.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            return self._tokens_service.get_payment_tokens_id(
+                id=token_id,
+                space=self.space_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error getting token %s: %s", token_id, e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting token %s: %s", token_id, e)
+            raise PostFinanceError(message=str(e)) from e
+
+    def delete_token(self, token_id: int) -> None:
+        """
+        Delete a payment token.
+
+        Args:
+            token_id: The ID of the token to delete.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            self._tokens_service.delete_payment_tokens_id(
+                id=token_id,
+                space=self.space_id,
+            )
+            logger.info("Deleted PostFinance token %s", token_id)
+        except ApiException as e:
+            logger.error("PostFinance API error deleting token %s: %s", token_id, e)
+            raise PostFinanceError(
+                message=str(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error deleting token %s: %s", token_id, e)
+            raise PostFinanceError(message=str(e)) from e

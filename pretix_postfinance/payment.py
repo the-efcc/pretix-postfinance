@@ -13,8 +13,11 @@ from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
+    ChargeState,
+    CustomersPresence,
     LineItemCreate,
     LineItemType,
+    TokenizationMode,
     TransactionState,
 )
 from pretix.base.forms import SecretKeySettingsField
@@ -78,6 +81,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     verbose_name = "PostFinance"
     abort_pending_allowed = False
     execute_payment_needs_user = True
+    installments_supported = True
 
     @property
     def test_mode_message(self) -> str:
@@ -555,6 +559,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         payment.info_data = info
         payment.save(update_fields=["info"])
 
+    def _get_order_merchant_reference(
+        self, order_code: str, installment_number: int | None = None
+    ) -> str:
+        merchant_reference = f"{self.event.slug}-{order_code}"
+        if installment_number is not None:
+            merchant_reference = f"{merchant_reference}-inst-{installment_number}"
+        return merchant_reference
+
     def _build_payment_transaction_line_items(
         self, payment: OrderPayment, detailed_line_items: bool = False
     ) -> list[LineItemCreate]:
@@ -587,6 +599,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         line_items = self._build_payment_transaction_line_items(
             payment, detailed_line_items=detailed_line_items
         )
+        installment_number = 1 if getattr(payment, "installment_plan_id", None) else None
+        tokenization_mode = None
+        if installment_number is not None:
+            tokenization_mode = TokenizationMode.FORCE_CREATION
+            logger.info("Enabling tokenization for installment payment %s", payment.pk)
 
         success_url = build_absolute_uri(
             self.event,
@@ -612,8 +629,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             line_items=line_items,
             success_url=success_url,
             failed_url=failed_url,
-            merchant_reference=f"{self.event.slug}-{payment.order.code}",
+            merchant_reference=self._get_order_merchant_reference(
+                payment.order.code,
+                installment_number=installment_number,
+            ),
             allowed_payment_method_configurations=self._parse_allowed_payment_methods(),
+            tokenization_mode=tokenization_mode,
             customer_email_address=payment.order.email,
         )
 
@@ -641,6 +662,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Creates detailed line items for each cart position and fee.
         """
         line_items: list[LineItemCreate] = []
+
+        # If installments selected, create a single line item for first payment
+        if cart.get('installments'):
+            installments = cart['installments']
+            line_items.append(
+                LineItemCreate(
+                    name=str(_("Installment 1 of {count}")).format(count=installments['count']),
+                    quantity=1,
+                    amountIncludingTax=float(installments['first_payment']),
+                    type=LineItemType.PRODUCT,
+                    uniqueId="installment-1",
+                )
+            )
+            return line_items
 
         # Add individual items from grouped positions
         positions = cart.get("positions", [])
@@ -857,6 +892,31 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if state in SUCCESS_STATES:
                 # Check if already confirmed (webhook may have processed first)
                 payment.refresh_from_db()
+
+                # Store payment token for installments
+                if hasattr(payment, 'installment_plan') and payment.installment_plan:
+                    if transaction.token and transaction.token.id:
+                        token_data = {
+                            'token_id': transaction.token.id,
+                            'customer_id': transaction.token.customer_id,
+                            'customer_email': transaction.token.customer_email_address,
+                        }
+                        payment.order.installment_plan.store_payment_token(token_data)
+                        logger.info(
+                            "Stored payment token %s for installment plan %s",
+                            transaction.token.id,
+                            payment.installment_plan.pk,
+                        )
+
+                        # Also store token ID in payment info for reference
+                        payment.info_data['token_id'] = transaction.token.id
+                        payment.save(update_fields=['info'])
+                    else:
+                        logger.warning(
+                            "Installment payment %s succeeded but no token was created",
+                            payment.pk,
+                        )
+
                 if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                     logger.info(
                         "Payment %s already confirmed, skipping (PostFinance state: %s)",
@@ -925,6 +985,173 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             self._clear_session_transaction_id(request)
 
         return None
+
+    def execute_installment(
+        self,
+        plan: Any,
+        installment: Any,
+    ) -> bool:
+        """
+        Execute a scheduled installment payment using the stored token.
+
+        :param plan: The InstallmentPlan containing the payment token
+        :param installment: The ScheduledInstallment to process
+        :return: True if successful, False otherwise
+        """
+        try:
+            token_data = plan.payment_token
+            if not token_data or 'token_id' not in token_data:
+                logger.error(
+                    "Cannot execute installment %s for order %s: no token_id in payment_token",
+                    installment.pk,
+                    plan.order.code,
+                )
+                installment.failure_reason = "No payment token available"
+                installment.save(update_fields=['failure_reason'])
+                return False
+
+            token_id = token_data['token_id']
+
+            line_items = [
+                LineItemCreate(
+                    name=f"Installment payment for order {plan.order.code}",
+                    quantity=1,
+                    amountIncludingTax=float(installment.amount),
+                    type=LineItemType.PRODUCT,
+                    uniqueId=f"installment-{plan.pk}-{installment.installment_number}",
+                )
+            ]
+
+            client = self._get_client()
+            transaction = client.create_transaction(
+                currency=plan.order.event.currency,
+                line_items=line_items,
+                merchant_reference=self._get_order_merchant_reference(
+                    plan.order.code,
+                    installment_number=installment.installment_number,
+                ),
+                token=token_id,
+                customers_presence=CustomersPresence.NOT_PRESENT,
+                customer_id=token_data.get("customer_id"),
+                customer_email_address=token_data.get("customer_email"),
+            )
+
+            if not transaction.id:
+                logger.error(
+                    "PostFinance transaction missing ID for installment %s of order %s",
+                    installment.pk,
+                    plan.order.code,
+                )
+                installment.failure_reason = "PostFinance transaction missing ID"
+                installment.save(update_fields=['failure_reason'])
+                return False
+
+            logger.info(
+                "Created installment transaction %s for installment %s of order %s using token %s",
+                transaction.id,
+                installment.pk,
+                plan.order.code,
+                token_id,
+            )
+
+            charge = client.process_with_token(transaction.id)
+
+            charge_state = charge.state
+
+            if charge_state == ChargeState.SUCCESSFUL:
+                logger.info(
+                    "Installment %s for order %s succeeded (PostFinance charge state: %s)",
+                    installment.pk,
+                    plan.order.code,
+                    charge_state,
+                )
+                return True
+
+            if charge_state == ChargeState.FAILED:
+                failure_reason = None
+                if charge.failure_reason:
+                    failure_reason = charge.failure_reason.description
+                installment.failure_reason = failure_reason or "PostFinance charge failed"
+                installment.save(update_fields=['failure_reason'])
+                logger.warning(
+                    "Installment %s for order %s failed (PostFinance charge state: %s, reason: %s)",
+                    installment.pk,
+                    plan.order.code,
+                    charge_state,
+                    failure_reason,
+                )
+                return False
+
+            installment.failure_reason = (
+                f"PostFinance charge not successful: {charge_state.value}"
+                if charge_state else
+                "PostFinance charge not successful"
+            )
+            installment.save(update_fields=['failure_reason'])
+            logger.warning(
+                "Installment %s for order %s is pending or incomplete "
+                "(PostFinance charge state: %s)",
+                installment.pk,
+                plan.order.code,
+                charge_state,
+            )
+            return False
+
+        except PostFinanceError as e:
+            logger.exception(
+                "PostFinance API error during installment execution: %s", e
+            )
+            installment.failure_reason = str(e)
+            installment.save(update_fields=['failure_reason'])
+            return False
+
+        except Exception as e:
+            logger.exception("Unexpected error during installment execution: %s", e)
+            installment.failure_reason = str(e)
+            installment.save(update_fields=['failure_reason'])
+            return False
+
+    def revoke_payment_token(self, installment_plan: Any) -> None:
+        """
+        Revoke the payment token stored in the installment plan.
+
+        This deletes the token at PostFinance and should be called when
+        the installment plan is cancelled or completed.
+
+        :param installment_plan: The InstallmentPlan containing the token to revoke
+        """
+        try:
+            token_data = installment_plan.payment_token
+            if not token_data or 'token_id' not in token_data:
+                logger.info(
+                    "No token to revoke for installment plan %s",
+                    installment_plan.pk,
+                )
+                return
+
+            token_id = token_data['token_id']
+            client = self._get_client()
+            client.delete_token(token_id)
+
+            logger.info(
+                "Revoked payment token %s for installment plan %s",
+                token_id,
+                installment_plan.pk,
+            )
+
+        except PostFinanceError as e:
+            logger.warning(
+                "Failed to revoke token for installment plan %s: %s",
+                installment_plan.pk,
+                e,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "Unexpected error revoking token for installment plan %s: %s",
+                installment_plan.pk,
+                e,
+            )
 
     def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """

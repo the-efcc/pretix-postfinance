@@ -5,7 +5,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from postfinancecheckout.models import TransactionState
+from postfinancecheckout.models import ChargeState, TokenizationMode, TransactionState
 from pretix.base.models import Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
@@ -464,6 +464,7 @@ def test_payment_prepare_persists_transaction_on_payment(
     req.session = {}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
+    payment.installment_plan_id = None
     result = prov.payment_prepare(req, payment)
 
     assert result == "https://checkout.postfinance.ch/pay/999888"
@@ -497,6 +498,7 @@ def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
         amount=order.total,
         info=json.dumps({"pending_transaction_id": 123456, "other": "keep"}),
     )
+    payment.installment_plan_id = None
     result = prov.payment_prepare(req, payment)
 
     assert result is False
@@ -505,6 +507,91 @@ def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
     payment.refresh_from_db()
     assert payment.info_data.get("pending_transaction_id") is None
     assert payment.info_data.get("other") == "keep"
+
+
+@pytest.mark.django_db
+def test_payment_prepare_uses_installment_reference_and_tokenization(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    captured_kwargs = {}
+
+    def capture_create_transaction(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return transaction_factory(id=999888)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        capture_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.post("/", {"payment": "postfinance"})
+    req.session = {}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    payment.installment_plan_id = 42
+
+    result = prov.payment_prepare(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    assert captured_kwargs["merchant_reference"] == f"{event.slug}-{order.code}-inst-1"
+    assert captured_kwargs["tokenization_mode"] == TokenizationMode.FORCE_CREATION
+
+
+@pytest.mark.django_db
+def test_execute_installment_uses_suffix_merchant_reference(env, monkeypatch):
+    event, order = env
+
+    captured_kwargs = {}
+
+    def capture_create_transaction(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(id=999888)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        capture_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        lambda self, tid: SimpleNamespace(
+            id=123456,
+            state=ChargeState.SUCCESSFUL,
+            failure_reason=None,
+        ),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    plan = SimpleNamespace(
+        pk=11,
+        order=order,
+        payment_token={
+            "token_id": 999888,
+            "customer_id": "cus_test123",
+            "customer_email": "test@example.com",
+        },
+    )
+
+    save_calls: list[list[str]] = []
+    installment = SimpleNamespace(
+        pk=7,
+        amount=Decimal("100.00"),
+        installment_number=2,
+        failure_reason=None,
+        save=lambda update_fields: save_calls.append(update_fields),
+    )
+
+    result = prov.execute_installment(plan, installment)
+
+    assert result is True
+    assert save_calls == []
+    assert captured_kwargs["merchant_reference"] == f"{event.slug}-{order.code}-inst-2"
 
 
 @pytest.mark.django_db
