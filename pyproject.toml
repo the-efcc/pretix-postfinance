@@ -156,4 +156,4 @@ tag_format = "v$version"
 update_changelog_on_bump = false
 annotated_tag = true
 gpg_sign = true
-bump_message = "Release: $new_version"
+bump_message = "release: $new_version"

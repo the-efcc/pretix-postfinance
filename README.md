@@ -44,7 +44,7 @@ uv pip install -e ".[dev]"
 # Enter development shell
 nix develop
 
-# Or use direnv (if you have a .envrc configured)
+# Or use direnv
 direnv allow
 ```
 

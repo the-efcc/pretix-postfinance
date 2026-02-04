@@ -47,24 +47,5 @@
           };
         }
       );
-
-      devShells = forAllSystems (
-        system:
-        let
-          pkgs = import nixpkgs { inherit system; };
-          pretixPython = pkgs.pretix.python;
-        in
-        {
-          default = pkgs.mkShell {
-            packages = [
-              (pretixPython.withPackages (ps: [
-                ps.pretix-postfinance
-                ps.postfinancecheckout
-                ps.pretix-plugin-build
-              ]))
-            ];
-          };
-        }
-      );
     };
 }

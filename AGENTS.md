@@ -30,18 +30,15 @@ PostFinance Checkout payment plugin for pretix.
 4. Refund history tracked in `info_data['refund_history']`
 
 ## Development Commands
-
-All commands match the GitHub workflow exactly:
-
 ```bash
 # Lint
-uv run ruff check .
+devenv shell -- uv run ruff check --fix
 
 # Type check
-uv run mypy pretix_postfinance/
+devenv shell -- uv run mypy pretix_postfinance/
 
 # Test
-uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v
+devenv shell -- uv run pytest tests/ -q -W ignore --cov=pretix_postfinance --cov-report=term-missing
 ```
 
 ## Important Conventions
