@@ -166,7 +166,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting space: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -198,7 +198,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting payment method configurations: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -254,7 +254,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error creating transaction: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -283,7 +283,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting payment page URL: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -312,7 +312,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting transaction: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -365,7 +365,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error creating refund: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -394,7 +394,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting refund: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -434,7 +434,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error validating webhook signature: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -461,7 +461,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting webhook URLs: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -497,7 +497,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error creating webhook URL: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -524,7 +524,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error getting webhook listeners: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e
@@ -572,7 +572,7 @@ class PostFinanceClient:
         except ApiException as e:
             logger.error("PostFinance API error creating webhook listener: %s", e)
             raise PostFinanceError(
-                message=str(e),
+                message=e.reason or str(e.status),
                 status_code=e.status,
                 error_code=str(e.status),
             ) from e

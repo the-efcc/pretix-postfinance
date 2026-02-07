@@ -16,8 +16,9 @@ from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django_scopes import scopes_disabled
-from pretix.base.models import OrderPayment, OrderRefund
+from pretix.base.models import Event, OrderPayment, OrderRefund
 from pretix.control.permissions import EventPermissionRequiredMixin
+from pretix.helpers.urls import build_absolute_uri
 
 from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
@@ -178,8 +179,6 @@ def _get_client_from_event(event: Any) -> PostFinanceClient | None:
 
 def _get_client_for_space(space_id: int) -> PostFinanceClient | None:
     """Find and return a PostFinanceClient for signature validation only."""
-    from pretix.base.models import Event
-
     for event in Event.objects.filter(live=True).only("id", "slug")[:100]:
         try:
             event_space_id = event.settings.get("payment_postfinance_space_id")
@@ -479,10 +478,7 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
                     ),
                 }
             )
-
-        from pretix.helpers.urls import build_absolute_uri as build_global_uri
-
-        webhook_url = build_global_uri("plugins:pretix_postfinance:postfinance.webhook")
+        webhook_url = build_absolute_uri("plugins:pretix_postfinance:postfinance.webhook")
 
         try:
             client = PostFinanceClient(

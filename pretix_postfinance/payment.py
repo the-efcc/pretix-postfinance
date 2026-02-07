@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from django import forms
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -174,9 +175,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Parse the allowed_payment_methods setting.
 
-        Handles both the new list format (from MultipleChoiceField) and the
-        legacy comma-separated string format for backwards compatibility.
-
         Returns:
             List of payment method configuration IDs, or None if all methods allowed.
         """
@@ -185,23 +183,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if not allowed_methods:
             return None
 
-        # Handle list format (from MultipleChoiceField)
-        if isinstance(allowed_methods, list):
-            try:
-                return [int(x) for x in allowed_methods if x]
-            except (ValueError, TypeError):
-                logger.warning("Invalid allowed_payment_methods list: %s", allowed_methods)
-                return None
-
-        # Handle legacy comma-separated string format
-        if isinstance(allowed_methods, str):
-            if not allowed_methods.strip():
-                return None
-            try:
-                return [int(x.strip()) for x in allowed_methods.split(",") if x.strip()]
-            except ValueError:
-                logger.warning("Invalid allowed_payment_methods string: %s", allowed_methods)
-                return None
+        try:
+            return [int(x) for x in allowed_methods if x]
+        except (ValueError, TypeError):
+            logger.warning("Invalid allowed_payment_methods list: %s", allowed_methods)
 
         return None
 
@@ -320,23 +305,38 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         choices=payment_method_choices,
                         widget=forms.CheckboxSelectMultiple,
                         required=False,
-                    )
-                    if payment_method_choices
-                    else forms.CharField(
-                        label=_("Allowed Payment Methods"),
-                        help_text=_(
-                            "Save your Space ID, User ID, and Authentication key first, "
-                            "then this field will show available payment methods as checkboxes."
-                        ),
-                        required=False,
-                        widget=forms.TextInput(
-                            attrs={"placeholder": _("Configure credentials first")}
-                        ),
                     ),
                 ),
             ]
         )
         return d
+
+    def settings_form_clean(self, cleaned_data: dict) -> dict:
+        if cleaned_data.get("_enabled"):
+            missing: list = []
+            if not cleaned_data.get("space_id"):
+                missing.append(str(_("Space ID")))
+            if not cleaned_data.get("user_id"):
+                missing.append(str(_("User ID")))
+            if not cleaned_data.get("auth_key"):
+                missing.append(str(_("Authentication key")))
+
+            test_missing: list = []
+            if not cleaned_data.get("test_space_id"):
+                missing.append(str(_("Test Space ID")))
+            if not cleaned_data.get("test_user_id"):
+                missing.append(str(_("Test User ID")))
+            if not cleaned_data.get("test_auth_key"):
+                missing.append(str(_("Test Authentication key")))
+
+            if missing and test_missing:
+                msg = _(
+                    "The following fields are required to enable "
+                    "this payment provider: {fields}"
+                ).format(fields=", ".join(missing))
+                raise ValidationError(msg)
+
+        return cleaned_data
 
     def settings_content_render(self, request: HttpRequest) -> str:
         """
