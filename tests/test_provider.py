@@ -301,7 +301,7 @@ def test_refund_success(env, factory, monkeypatch):
     prov.execute_refund(refund)
 
     refund.refresh_from_db()
-    assert refund.state == OrderRefund.REFUND_STATE_DONE
+    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
 
 
 @pytest.mark.django_db
@@ -347,7 +347,7 @@ def test_refund_partial(env, factory, monkeypatch):
     prov.execute_refund(refund)
 
     refund.refresh_from_db()
-    assert refund.state == OrderRefund.REFUND_STATE_DONE
+    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
     # Refund info is stored on the refund object
     assert refund.info_data.get("refund_id") == 789012
     assert refund.info_data.get("state") == "SUCCESSFUL"

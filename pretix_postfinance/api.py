@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from decimal import Decimal
 
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
@@ -324,7 +325,7 @@ class PostFinanceClient:
         transaction_id: int,
         external_id: str,
         merchant_reference: str | None = None,
-        amount: float | None = None,
+        amount: Decimal | float | None = None,
     ) -> Refund:
         """
         Create a refund for a completed transaction.
@@ -347,12 +348,13 @@ class PostFinanceClient:
             PostFinanceError: If the request fails (e.g., transaction not
                 in a refundable state, already fully refunded, etc.).
         """
+        amount_float = float(amount) if amount is not None else None
         refund_create = RefundCreate(
             transaction=transaction_id,
             externalId=external_id,
             type=RefundType.MERCHANT_INITIATED_ONLINE,
             merchantReference=merchant_reference,
-            amount=amount,
+            amount=amount_float,
         )
 
         try:

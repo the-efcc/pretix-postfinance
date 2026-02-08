@@ -783,7 +783,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 transaction_id=int(transaction_id),
                 external_id=external_id,
                 merchant_reference=merchant_reference,
-                amount=float(refund.amount),
+                amount=refund.amount,
             )
 
             # Store refund info on the OrderRefund object
@@ -799,10 +799,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     else None,
                 }
             )
-            refund.save(update_fields=["info"])
-
-            # Mark refund as done
-            refund.done()
+            refund.state = OrderRefund.REFUND_STATE_TRANSIT
+            refund.save(update_fields=["info", "state"])
 
             logger.info(
                 "PostFinance refund %s created for payment %s (amount %s)",
