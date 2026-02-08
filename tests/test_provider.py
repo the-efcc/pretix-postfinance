@@ -133,8 +133,8 @@ def test_perform_success(env, factory, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_perform_success_authorized_state(env, factory, monkeypatch):
-    """Test successful payment with AUTHORIZED state."""
+def test_perform_authorized_state_pending(env, factory, monkeypatch):
+    """Test AUTHORIZED state sets payment to pending (not confirmed - funds not captured yet)."""
     event, order = env
 
     def get_transaction(transaction_id):
@@ -155,7 +155,7 @@ def test_perform_success_authorized_state(env, factory, monkeypatch):
     prov.execute_payment(req, payment)
 
     order.refresh_from_db()
-    assert order.status == Order.STATUS_PAID
+    assert order.status == Order.STATUS_PENDING
 
 
 @pytest.mark.django_db
@@ -427,123 +427,6 @@ def test_refund_wrong_state(env, factory):
         prov.execute_refund(refund)
 
     assert "cannot be refunded" in str(exc_info.value)
-
-
-@pytest.mark.django_db
-def test_capture_success(env, factory, monkeypatch):
-    """Test successful manual capture."""
-    event, order = env
-
-    def complete_transaction(transaction_id):
-        return MockedCompletion()
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.complete_transaction",
-        lambda self, tid: complete_transaction(tid),
-    )
-
-    order.status = Order.STATUS_PENDING
-    order.save()
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.AUTHORIZED.value,
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    success, error = prov.execute_capture(payment)
-
-    assert success is True
-    assert error is None
-
-    payment.refresh_from_db()
-    assert payment.info_data.get("state") == TransactionState.COMPLETED.value
-
-
-@pytest.mark.django_db
-def test_capture_wrong_state(env, factory):
-    """Test capture when transaction is not in AUTHORIZED state."""
-    event, order = env
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.COMPLETED.value,  # Already completed
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    success, error = prov.execute_capture(payment)
-
-    assert success is False
-    assert "cannot be captured" in error
-
-
-@pytest.mark.django_db
-def test_void_success(env, factory, monkeypatch):
-    """Test successful void."""
-    event, order = env
-
-    def void_transaction(transaction_id):
-        return MockedVoid()
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.void_transaction",
-        lambda self, tid: void_transaction(tid),
-    )
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.AUTHORIZED.value,
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    success, error = prov.execute_void(payment)
-
-    assert success is True
-    assert error is None
-
-    payment.refresh_from_db()
-    assert payment.info_data.get("state") == TransactionState.VOIDED.value
-
-
-@pytest.mark.django_db
-def test_void_wrong_state(env, factory):
-    """Test void when transaction is not in AUTHORIZED state."""
-    event, order = env
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.COMPLETED.value,  # Already completed
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    success, error = prov.execute_void(payment)
-
-    assert success is False
-    assert "cannot be voided" in error
 
 
 @pytest.mark.django_db
@@ -1057,80 +940,6 @@ def test_checkout_prepare_passes_line_items(env, factory, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_manual_capture_mode(env, factory, monkeypatch):
-    """Test that manual capture mode uses COMPLETE_DEFERRED."""
-    from postfinancecheckout.models import TransactionCompletionBehavior
-
-    event, order = env
-    event.settings.set("payment_postfinance_capture_mode", "manual")
-
-    captured_kwargs = {}
-
-    def capture_create_transaction(**kwargs):
-        captured_kwargs.update(kwargs)
-        t = MockedTransaction()
-        t.id = 999888
-        return t
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: capture_create_transaction(**kwargs),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    prov.checkout_prepare(req, cart)
-
-    assert captured_kwargs["completion_behavior"] == TransactionCompletionBehavior.COMPLETE_DEFERRED
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_immediate_capture_mode(env, factory, monkeypatch):
-    """Test that immediate capture mode uses COMPLETE_IMMEDIATELY."""
-    from postfinancecheckout.models import TransactionCompletionBehavior
-
-    event, order = env
-    event.settings.set("payment_postfinance_capture_mode", "immediate")
-
-    captured_kwargs = {}
-
-    def capture_create_transaction(**kwargs):
-        captured_kwargs.update(kwargs)
-        t = MockedTransaction()
-        t.id = 999888
-        return t
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: capture_create_transaction(**kwargs),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    prov.checkout_prepare(req, cart)
-
-    assert (
-        captured_kwargs["completion_behavior"] == TransactionCompletionBehavior.COMPLETE_IMMEDIATELY
-    )
-
-
-@pytest.mark.django_db
 def test_checkout_prepare_passes_allowed_payment_methods(env, factory, monkeypatch):
     """Test that allowed payment methods are passed to API."""
     event, order = env
@@ -1238,39 +1047,3 @@ def test_api_payment_details_empty_info(env):
     assert details["state"] is None
     assert details["payment_method"] is None
     assert details["created_on"] is None
-
-
-# Cancel payment tests
-
-
-@pytest.mark.django_db
-def test_cancel_payment_voids_authorized(env, monkeypatch):
-    """Test cancel_payment calls void for AUTHORIZED payment."""
-    event, order = env
-
-    void_called = {"called": False}
-
-    def void_transaction(tid):
-        void_called["called"] = True
-        return MockedVoid()
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.void_transaction",
-        lambda self, tid: void_transaction(tid),
-    )
-
-    payment = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps(
-            {
-                "transaction_id": 123456,
-                "state": TransactionState.AUTHORIZED.value,
-            }
-        ),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    prov.cancel_payment(payment)
-
-    assert void_called["called"] is True

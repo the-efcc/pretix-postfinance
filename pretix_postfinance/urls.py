@@ -24,10 +24,4 @@ urlpatterns = [
         views.PostFinanceSetupWebhooksView.as_view(),
         name="postfinance.setup_webhooks",
     ),
-    re_path(
-        r"^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/postfinance/capture/"
-        r"(?P<order>[^/]+)/(?P<payment>\d+)/$",
-        views.PostFinanceCaptureView.as_view(),
-        name="postfinance.capture",
-    ),
 ]

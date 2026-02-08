@@ -6,15 +6,12 @@ Inspired by pretix's Stripe plugin test suite.
 
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
 from django.utils.timezone import now
-from django_scopes import scopes_disabled
-from postfinancecheckout.models import TransactionState
 from pretix.base.models import Event, Order, Organizer, Team, User
 
 from pretix_postfinance.api import PostFinanceError
@@ -120,135 +117,3 @@ class TestTestConnectionView:
 
         # Should redirect to login
         assert response.status_code in (302, 403)
-
-
-class TestCaptureView:
-    """Tests for PostFinanceCaptureView."""
-
-    @pytest.mark.django_db
-    def test_capture_success(self, env, monkeypatch):
-        """Test successful payment capture."""
-        client, event, order = env
-
-        mock_completion = MagicMock()
-        mock_completion.id = 111222
-
-        monkeypatch.setattr(
-            "pretix_postfinance.payment.PostFinanceClient.complete_transaction",
-            lambda self, tid: mock_completion,
-        )
-
-        with scopes_disabled():
-            payment = order.payments.create(
-                provider="postfinance",
-                amount=order.total,
-                info=json.dumps(
-                    {
-                        "transaction_id": 123456,
-                        "state": TransactionState.AUTHORIZED.value,
-                    }
-                ),
-            )
-
-        url = (
-            f"/control/event/{event.organizer.slug}/{event.slug}"
-            f"/postfinance/capture/{order.code}/{payment.pk}/"
-        )
-        response = client.post(url)
-
-        # Should redirect after success
-        assert response.status_code == 302
-
-        with scopes_disabled():
-            payment.refresh_from_db()
-            assert payment.info_data.get("state") == TransactionState.COMPLETED.value
-
-    @pytest.mark.django_db
-    def test_capture_wrong_state(self, env):
-        """Test capture fails for non-authorized payment."""
-        client, event, order = env
-
-        with scopes_disabled():
-            payment = order.payments.create(
-                provider="postfinance",
-                amount=order.total,
-                info=json.dumps(
-                    {
-                        "transaction_id": 123456,
-                        "state": TransactionState.COMPLETED.value,  # Already completed
-                    }
-                ),
-            )
-
-        url = (
-            f"/control/event/{event.organizer.slug}/{event.slug}"
-            f"/postfinance/capture/{order.code}/{payment.pk}/"
-        )
-        response = client.post(url)
-
-        # Should redirect with error message
-        assert response.status_code == 302
-
-    @pytest.mark.django_db
-    def test_capture_api_error(self, env, monkeypatch):
-        """Test capture with API error."""
-        client, event, order = env
-
-        def complete_error(transaction_id):
-            raise PostFinanceError("API Error", status_code=500)
-
-        monkeypatch.setattr(
-            "pretix_postfinance.payment.PostFinanceClient.complete_transaction",
-            lambda self, tid: complete_error(tid),
-        )
-
-        with scopes_disabled():
-            payment = order.payments.create(
-                provider="postfinance",
-                amount=order.total,
-                info=json.dumps(
-                    {
-                        "transaction_id": 123456,
-                        "state": TransactionState.AUTHORIZED.value,
-                    }
-                ),
-            )
-
-        url = (
-            f"/control/event/{event.organizer.slug}/{event.slug}"
-            f"/postfinance/capture/{order.code}/{payment.pk}/"
-        )
-        response = client.post(url)
-
-        # Should redirect with error message
-        assert response.status_code == 302
-
-    @pytest.mark.django_db
-    def test_capture_requires_permission(self, env):
-        """Test capture requires can_change_orders permission."""
-        client, event, order = env
-
-        # Remove permission
-        with scopes_disabled():
-            team = Team.objects.get(organizer=event.organizer)
-            team.can_change_orders = False
-            team.save()
-
-            payment = order.payments.create(
-                provider="postfinance",
-                amount=order.total,
-                info=json.dumps(
-                    {
-                        "transaction_id": 123456,
-                        "state": TransactionState.AUTHORIZED.value,
-                    }
-                ),
-            )
-
-        url = (
-            f"/control/event/{event.organizer.slug}/{event.slug}"
-            f"/postfinance/capture/{order.code}/{payment.pk}/"
-        )
-        response = client.post(url)
-
-        assert response.status_code == 403

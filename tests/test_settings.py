@@ -167,7 +167,6 @@ def test_settings_form_fields_contain_all_required_fields(event, monkeypatch):
         "auth_key",
         "public_name",
         "description",
-        "capture_mode",
         "allowed_payment_methods",
     ]
 

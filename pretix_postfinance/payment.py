@@ -15,7 +15,6 @@ from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
     LineItemCreate,
     LineItemType,
-    TransactionCompletionBehavior,
     TransactionState,
 )
 from pretix.base.forms import SecretKeySettingsField
@@ -32,13 +31,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# PostFinance transaction states that indicate successful payment
+# PostFinance transaction states that indicate payment is captured/settled
+# FULFILL = final state, money confirmed, safe to deliver goods
+# COMPLETED = transfer initiated, waiting for final confirmation
+# Note: AUTHORIZED means reservation only - funds NOT transferred yet
 SUCCESS_STATES = {
-    TransactionState.AUTHORIZED,
-    TransactionState.COMPLETED,
     TransactionState.FULFILL,
-    TransactionState.CONFIRMED,
-    TransactionState.PROCESSING,
+    TransactionState.COMPLETED,
 }
 
 # PostFinance transaction states that indicate failed payment
@@ -226,24 +225,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                         ),
                         widget=forms.Textarea(attrs={"rows": 3}),
                         required=False,
-                    ),
-                ),
-                (
-                    "capture_mode",
-                    forms.ChoiceField(
-                        label=_("Capture Mode"),
-                        help_text=_(
-                            "Choose when to capture (complete) payments. "
-                            "'Immediate' captures automatically after authorization. "
-                            "'Manual' keeps payments in authorized state until you "
-                            "capture them manually."
-                        ),
-                        choices=[
-                            ("immediate", _("Immediate (Recommended)")),
-                            ("manual", _("Manual")),
-                        ],
-                        initial="immediate",
-                        required=True,
                     ),
                 ),
                 (
@@ -487,13 +468,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
             merchant_reference = f"pretix-{self.event.slug}"
 
-            # Determine completion behavior based on capture mode setting
-            capture_mode = self.settings.get("capture_mode", "immediate")
-            if capture_mode == "manual":
-                completion_behavior = TransactionCompletionBehavior.COMPLETE_DEFERRED
-            else:
-                completion_behavior = TransactionCompletionBehavior.COMPLETE_IMMEDIATELY
-
             # Parse allowed payment method configurations
             allowed_payment_methods = self._parse_allowed_payment_methods()
 
@@ -503,7 +477,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 success_url=success_url,
                 failed_url=failed_url,
                 merchant_reference=merchant_reference,
-                completion_behavior=completion_behavior,
                 allowed_payment_method_configurations=allowed_payment_methods,
             )
 
@@ -704,7 +677,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
-        state = info_data.get("state")
 
         # Build dashboard URL if we have the required info
         dashboard_url = None
@@ -721,20 +693,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
             error_suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
 
-        # Build capture URL if payment is in AUTHORIZED state
-        can_capture = state == TransactionState.AUTHORIZED.value
-        capture_url = None
-        if can_capture:
-            capture_url = reverse(
-                "plugins:pretix_postfinance:postfinance.capture",
-                kwargs={
-                    "organizer": self.event.organizer.slug,
-                    "event": self.event.slug,
-                    "order": payment.order.code,
-                    "payment": payment.pk,
-                },
-            )
-
         template = get_template("pretixplugins/postfinance/control.html")
         ctx = {
             "request": request,
@@ -743,8 +701,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "payment_info": info_data,
             "dashboard_url": dashboard_url,
             "error_suggestion": error_suggestion,
-            "can_capture": can_capture,
-            "capture_url": capture_url,
         }
         return template.render(ctx)
 
@@ -973,221 +929,3 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # For refunds, clear the info
             obj.info_data = {"_shredded": True}
             obj.save(update_fields=["info"])
-
-    def cancel_payment(self, payment: OrderPayment) -> None:
-        """
-        Cancel a payment.
-
-        For PostFinance, if the transaction is in AUTHORIZED state, we void it.
-        For other states, we use the default cancellation behavior.
-        """
-        self.execute_void(payment)
-
-        # Call parent implementation to set payment state to canceled
-        super().cancel_payment(payment)
-
-    # Helper methods for custom views (capture, void, refund)
-
-    def execute_capture(
-        self, payment: OrderPayment, user: str = "system"
-    ) -> tuple[bool, str | None]:
-        """
-        Capture (complete) an authorized transaction.
-
-        Args:
-            payment: The OrderPayment to capture.
-            user: The user performing the action (for audit logging).
-        """
-        info_data = payment.info_data or {}
-        transaction_id = info_data.get("transaction_id")
-
-        if not transaction_id:
-            return (False, str(_("Transaction ID not found.")))
-
-        # Check if transaction is in AUTHORIZED state
-        current_state = info_data.get("state")
-        if current_state != TransactionState.AUTHORIZED.value:
-            return (
-                False,
-                str(
-                    _("Transaction cannot be captured. Current state: {state}").format(
-                        state=current_state or "Unknown"
-                    )
-                ),
-            )
-
-        try:
-            client = self._get_client()
-            completion = client.complete_transaction(int(transaction_id))
-
-            # Update payment info with completion details
-            info_data["state"] = TransactionState.COMPLETED.value
-            if completion.id:
-                info_data["completion_id"] = completion.id
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
-
-            logger.info(
-                "PostFinance transaction %s captured successfully for payment %s",
-                transaction_id,
-                payment.pk,
-            )
-
-            # Audit log for successful capture
-            payment.order.log_action(
-                "pretix_postfinance.capture",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": True,
-                },
-            )
-
-            # Confirm the payment in pretix
-            try:
-                payment.confirm()
-                logger.info("Payment %s confirmed after capture", payment.pk)
-            except Exception as e:
-                logger.exception(
-                    "Error confirming payment %s after capture: %s",
-                    payment.pk,
-                    e,
-                )
-
-            return (True, None)
-
-        except PostFinanceError as e:
-            logger.exception(
-                "PostFinance API error capturing transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            # Audit log for failed capture
-            payment.order.log_action(
-                "pretix_postfinance.capture.failed",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": False,
-                    "error": str(e),
-                },
-            )
-            return (False, str(_("Capture failed: {error}").format(error=str(e))))
-        except Exception as e:
-            logger.exception(
-                "Unexpected error capturing transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            # Audit log for failed capture
-            payment.order.log_action(
-                "pretix_postfinance.capture.failed",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": False,
-                    "error": str(e),
-                },
-            )
-            return (False, str(_("Unexpected error: {error}").format(error=str(e))))
-
-    def execute_void(self, payment: OrderPayment, user: str = "system") -> tuple[bool, str | None]:
-        """
-        Void an authorized transaction.
-
-        Args:
-            payment: The OrderPayment to void.
-            user: The user performing the action (for audit logging).
-        """
-        info_data = payment.info_data or {}
-        transaction_id = info_data.get("transaction_id")
-
-        if not transaction_id:
-            return (False, str(_("Transaction ID not found.")))
-
-        # Check if transaction is in AUTHORIZED state
-        current_state = info_data.get("state")
-        if current_state != TransactionState.AUTHORIZED.value:
-            return (
-                False,
-                str(
-                    _("Transaction cannot be voided. Current state: {state}").format(
-                        state=current_state or "Unknown"
-                    )
-                ),
-            )
-
-        try:
-            client = self._get_client()
-            void_result = client.void_transaction(int(transaction_id))
-
-            # Update payment info with void details
-            info_data["state"] = TransactionState.VOIDED.value
-            if void_result.id:
-                info_data["void_id"] = void_result.id
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
-
-            logger.info(
-                "PostFinance transaction %s voided successfully for payment %s",
-                transaction_id,
-                payment.pk,
-            )
-
-            # Audit log for successful void
-            payment.order.log_action(
-                "pretix_postfinance.void",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": True,
-                },
-            )
-
-            # Fail the payment in pretix (void means the payment won't be captured)
-            try:
-                payment.fail(info={"state": TransactionState.VOIDED.value})
-                logger.info("Payment %s marked as failed after void", payment.pk)
-            except Exception as e:
-                logger.exception(
-                    "Error failing payment %s after void: %s",
-                    payment.pk,
-                    e,
-                )
-
-            return (True, None)
-
-        except PostFinanceError as e:
-            logger.exception(
-                "PostFinance API error voiding transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            # Audit log for failed void
-            payment.order.log_action(
-                "pretix_postfinance.void.failed",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": False,
-                    "error": str(e),
-                },
-            )
-            return (False, str(_("Void failed: {error}").format(error=str(e))))
-        except Exception as e:
-            logger.exception(
-                "Unexpected error voiding transaction %s: %s",
-                transaction_id,
-                e,
-            )
-            # Audit log for failed void
-            payment.order.log_action(
-                "pretix_postfinance.void.failed",
-                data={
-                    "transaction_id": transaction_id,
-                    "user": user,
-                    "success": False,
-                    "error": str(e),
-                },
-            )
-            return (False, str(_("Unexpected error: {error}").format(error=str(e))))

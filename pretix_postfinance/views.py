@@ -1,7 +1,7 @@
 """
 Views for PostFinance payment plugin.
 
-Handles webhook callbacks and admin capture action.
+Handles webhook callbacks and admin settings actions.
 """
 
 from __future__ import annotations
@@ -11,14 +11,12 @@ import json
 import logging
 from typing import Any
 
-from django.contrib import messages
 from django.http import HttpRequest, HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404, redirect
 from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django_scopes import scopes_disabled
-from pretix.base.models import Order, OrderPayment, OrderRefund
+from pretix.base.models import OrderPayment, OrderRefund
 from pretix.control.permissions import EventPermissionRequiredMixin
 
 from ._types import PretixHttpRequest
@@ -474,35 +472,3 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
                     "message": str(_("Failed to setup webhooks: {error}").format(error=str(e))),
                 }
             )
-
-
-class PostFinanceCaptureView(EventPermissionRequiredMixin, View):
-    """Handle manual capture requests for AUTHORIZED payments."""
-
-    permission = "can_change_orders"
-
-    def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        order = get_object_or_404(Order, code=kwargs["order"], event=request.event)
-        payment = get_object_or_404(
-            OrderPayment, pk=kwargs["payment"], order=order, provider="postfinance"
-        )
-
-        provider = payment.payment_provider
-        user = (
-            getattr(request.user, "email", None)
-            or getattr(request.user, "username", None)
-            or str(request.user.pk)
-        )
-        success, error_message = provider.execute_capture(payment, user=user)
-
-        if success:
-            messages.success(request, str(_("Payment captured successfully.")))
-        else:
-            messages.error(request, error_message or str(_("Failed to capture payment.")))
-
-        return redirect(
-            "control:event.order",
-            organizer=request.event.organizer.slug,
-            event=request.event.slug,
-            code=order.code,
-        )

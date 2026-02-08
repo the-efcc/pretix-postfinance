@@ -21,11 +21,8 @@ from postfinancecheckout.models import (
     RefundType,
     Space,
     Transaction,
-    TransactionCompletion,
-    TransactionCompletionBehavior,
     TransactionCreate,
     TransactionState,
-    TransactionVoid,
     WebhookListener,
     WebhookListenerCreate,
     WebhookUrl,
@@ -216,7 +213,6 @@ class PostFinanceClient:
         failed_url: str,
         merchant_reference: str | None = None,
         language: str | None = None,
-        completion_behavior: TransactionCompletionBehavior | None = None,
         allowed_payment_method_configurations: list[int] | None = None,
     ) -> Transaction:
         """
@@ -229,9 +225,6 @@ class PostFinanceClient:
             failed_url: URL to redirect to on failed/cancelled payment.
             merchant_reference: Optional merchant reference for this transaction.
             language: Optional language code for the payment page (e.g., 'en-US').
-            completion_behavior: Optional transaction completion behavior.
-                COMPLETE_IMMEDIATELY for immediate capture,
-                COMPLETE_DEFERRED for manual capture.
             allowed_payment_method_configurations: Optional list of payment method
                 configuration IDs to restrict which payment methods are available.
                 If not provided, all configured payment methods are available.
@@ -249,7 +242,6 @@ class PostFinanceClient:
             failedUrl=failed_url,
             merchantReference=merchant_reference,
             language=language,
-            completionBehavior=completion_behavior,
             allowedPaymentMethodConfigurations=allowed_payment_method_configurations,
         )
 
@@ -325,72 +317,6 @@ class PostFinanceClient:
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting transaction: %s", e)
-            raise PostFinanceError(message=str(e)) from e
-
-    def complete_transaction(self, transaction_id: int) -> TransactionCompletion:
-        """
-        Complete (capture) an authorized transaction.
-
-        This completes a transaction that is in the AUTHORIZED state,
-        capturing the authorized funds.
-
-        Args:
-            transaction_id: The ID of the transaction to complete.
-
-        Returns:
-            The TransactionCompletion object with completion details.
-
-        Raises:
-            PostFinanceError: If the request fails (e.g., transaction not
-                in AUTHORIZED state, already completed, etc.).
-        """
-        try:
-            return self._transactions_service.post_payment_transactions_id_complete_online(
-                id=transaction_id,
-                space=self.space_id,
-            )
-        except ApiException as e:
-            logger.error("PostFinance API error completing transaction: %s", e)
-            raise PostFinanceError(
-                message=str(e),
-                status_code=e.status,
-                error_code=str(e.status),
-            ) from e
-        except PostFinanceCheckoutSdkException as e:
-            logger.error("PostFinance SDK error completing transaction: %s", e)
-            raise PostFinanceError(message=str(e)) from e
-
-    def void_transaction(self, transaction_id: int) -> TransactionVoid:
-        """
-        Void an authorized transaction.
-
-        This voids a transaction that is in the AUTHORIZED state,
-        releasing the authorized funds back to the customer.
-
-        Args:
-            transaction_id: The ID of the transaction to void.
-
-        Returns:
-            The TransactionVoid object with void details.
-
-        Raises:
-            PostFinanceError: If the request fails (e.g., transaction not
-                in AUTHORIZED state, already voided, etc.).
-        """
-        try:
-            return self._transactions_service.post_payment_transactions_id_void_online(
-                id=transaction_id,
-                space=self.space_id,
-            )
-        except ApiException as e:
-            logger.error("PostFinance API error voiding transaction: %s", e)
-            raise PostFinanceError(
-                message=str(e),
-                status_code=e.status,
-                error_code=str(e.status),
-            ) from e
-        except PostFinanceCheckoutSdkException as e:
-            logger.error("PostFinance SDK error voiding transaction: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
     def refund_transaction(

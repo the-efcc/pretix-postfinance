@@ -426,8 +426,8 @@ def test_webhook_pending_to_created_state(env, client, monkeypatch, valid_signat
 
 
 @pytest.mark.django_db
-def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch, valid_signature):
-    """Test webhook with AUTHORIZED state confirms the payment."""
+def test_webhook_authorized_state_sets_pending(env, client, monkeypatch, valid_signature):
+    """Test webhook with AUTHORIZED state sets payment to pending (not confirmed)."""
     event, order = env
     order.status = Order.STATUS_PENDING
     order.save()
@@ -447,7 +447,7 @@ def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch, val
             provider="postfinance",
             amount=order.total,
             info=json.dumps({"transaction_id": 123456}),
-            state=OrderPayment.PAYMENT_STATE_PENDING,
+            state=OrderPayment.PAYMENT_STATE_CREATED,
         )
 
     response = client.post(
@@ -459,8 +459,12 @@ def test_webhook_authorized_state_confirms_payment(env, client, monkeypatch, val
 
     assert response.status_code == 200
 
+    with scopes_disabled():
+        payment.refresh_from_db()
+        assert payment.state == OrderPayment.PAYMENT_STATE_PENDING
+
     order.refresh_from_db()
-    assert order.status == Order.STATUS_PAID
+    assert order.status == Order.STATUS_PENDING
 
 
 @pytest.mark.django_db
