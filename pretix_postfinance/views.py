@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 WEBHOOK_STATUS_NOT_FOUND = "not_found"
 WEBHOOK_STATUS_NO_CLIENT = "no_client"
 WEBHOOK_STATUS_API_ERROR = "api_error"
+WEBHOOK_STATUS_INTERNAL_ERROR = "internal_error"
 WEBHOOK_STATUS_OK = "ok"
 
 
@@ -109,7 +110,7 @@ def webhook(request: HttpRequest) -> HttpResponse:
 
     # Process webhook and return appropriate HTTP status code:
     # - 200: Success or entity not found in our DB (legitimate "not ours" case)
-    # - 500: Configuration error (no client configured for space)
+    # - 500: Configuration error or internal error (retriable)
     # - 502: External API error (PostFinance API call failed, retriable)
     if entity_id:
         status, _ = _process_transaction_webhook(entity_id, space_id)
@@ -128,6 +129,12 @@ def webhook(request: HttpRequest) -> HttpResponse:
             return JsonResponse(
                 {"error": "Failed to fetch entity from PostFinance API"},
                 status=502,
+            )
+
+        if status == WEBHOOK_STATUS_INTERNAL_ERROR:
+            return JsonResponse(
+                {"error": "Internal error processing webhook"},
+                status=500,
             )
 
     return HttpResponse(status=200)
@@ -260,22 +267,19 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
         try:
             payment.confirm()
             logger.info("PostFinance webhook: payment %s confirmed", payment.pk)
+            return (WEBHOOK_STATUS_OK, True)
         except Exception as e:
             logger.exception("PostFinance webhook: error confirming payment %s: %s", payment.pk, e)
-        return (WEBHOOK_STATUS_OK, True)
+            return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
 
     if transaction_state in FAILURE_STATES:
-        payment.state = OrderPayment.PAYMENT_STATE_FAILED
-        payment.save(update_fields=["state"])
-        payment.order.log_action(
-            "pretix.event.order.payment.failed",
-            {
-                "local_id": payment.local_id,
-                "provider": payment.provider,
-            },
-        )
-        logger.info("PostFinance webhook: payment %s failed", payment.pk)
-        return (WEBHOOK_STATUS_OK, True)
+        try:
+            payment.fail(info={"state": transaction_state.value if transaction_state else None})
+            logger.info("PostFinance webhook: payment %s failed", payment.pk)
+            return (WEBHOOK_STATUS_OK, True)
+        except Exception as e:
+            logger.exception("PostFinance webhook: error failing payment %s: %s", payment.pk, e)
+            return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
 
     # Handle pending/intermediate states
     if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
