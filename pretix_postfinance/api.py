@@ -581,7 +581,7 @@ class PostFinanceClient:
             logger.error("PostFinance SDK error creating webhook listener: %s", e)
             raise PostFinanceError(message=str(e)) from e
 
-    def setup_webhooks(self, webhook_url: str) -> dict[str, int | None]:
+    def setup_webhooks(self, webhook_url: str) -> dict[str, int | bool | None]:
         """
         Set up webhooks for Transaction and Refund state changes.
 
@@ -594,8 +594,12 @@ class PostFinanceClient:
             webhook_url: The URL where webhooks will be sent.
 
         Returns:
-            A dict with keys 'webhook_url_id', 'transaction_listener_id',
-            and 'refund_listener_id'.
+            A dict with keys:
+            - 'webhook_url_id': ID of the webhook URL
+            - 'transaction_listener_id': ID of the transaction listener
+            - 'refund_listener_id': ID of the refund listener
+            - 'created_transaction_listener': True if created, False if already existed
+            - 'created_refund_listener': True if created, False if already existed
 
         Raises:
             PostFinanceError: If any API request fails.
@@ -622,10 +626,12 @@ class PostFinanceClient:
             RefundState.FAILED.value,
         ]
 
-        result: dict[str, int | None] = {
+        result: dict[str, int | bool | None] = {
             "webhook_url_id": None,
             "transaction_listener_id": None,
             "refund_listener_id": None,
+            "created_transaction_listener": False,
+            "created_refund_listener": False,
         }
 
         # Check if a webhook URL with this URL already exists
@@ -680,6 +686,7 @@ class PostFinanceClient:
                 entity_states=TRANSACTION_STATES,
             )
             result["transaction_listener_id"] = transaction_listener.id
+            result["created_transaction_listener"] = True
             logger.info("Created transaction listener with ID %s", transaction_listener.id)
 
         # Create Refund listener if it doesn't exist
@@ -691,6 +698,7 @@ class PostFinanceClient:
                 entity_states=REFUND_STATES,
             )
             result["refund_listener_id"] = refund_listener.id
+            result["created_refund_listener"] = True
             logger.info("Created refund listener with ID %s", refund_listener.id)
 
         return result

@@ -487,15 +487,34 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
             )
             result = client.setup_webhooks(webhook_url)
 
+            created_transaction = result.get("created_transaction_listener", False)
+            created_refund = result.get("created_refund_listener", False)
+
+            if created_transaction and created_refund:
+                message = _(
+                    "Webhooks configured successfully! "
+                    "Transaction and refund updates will be received automatically."
+                )
+            elif created_transaction:
+                message = _(
+                    "Transaction webhook configured. "
+                    "Refund webhook was already set up."
+                )
+            elif created_refund:
+                message = _(
+                    "Refund webhook configured. "
+                    "Transaction webhook was already set up."
+                )
+            else:
+                message = _(
+                    "Webhooks are already configured. "
+                    "No changes were needed."
+                )
+
             return JsonResponse(
                 {
                     "success": True,
-                    "message": str(
-                        _(
-                            "Webhooks configured successfully! "
-                            "Transaction updates will be received automatically."
-                        )
-                    ),
+                    "message": str(message),
                     "details": result,
                 }
             )
