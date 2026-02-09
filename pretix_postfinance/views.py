@@ -313,9 +313,8 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
     """
     Process a refund state update from webhook.
 
-    Note: PostFinance typically does not send separate webhooks for refund entities.
-    Refund state changes are usually reported through the parent transaction webhook.
-    This function exists as a fallback for connectors that may support refund webhooks.
+    PostFinance sends webhooks for refund entities when refund state changes.
+    This is triggered when a refund reaches SUCCESSFUL or FAILED state.
 
     Returns:
         tuple[str, bool | None]: A tuple of (status, processed) where:
