@@ -589,24 +589,31 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
 
             if state in SUCCESS_STATES:
-                try:
-                    payment.confirm()
+                # Check if already confirmed (webhook may have processed first)
+                payment.refresh_from_db()
+                if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                     logger.info(
-                        "Payment %s confirmed (PostFinance state: %s)",
+                        "Payment %s already confirmed, skipping (PostFinance state: %s)",
                         payment.pk,
                         state,
                     )
-                except Exception as e:
-                    logger.exception(
-                        "Error confirming payment %s: %s",
-                        payment.pk,
-                        e,
-                    )
-                    raise PaymentException(
-                        str(
-                            _("Payment was successful but order confirmation failed: {error}")
-                        ).format(error=str(e))
-                    ) from e
+                else:
+                    try:
+                        payment.confirm()
+                        logger.info(
+                            "Payment %s confirmed (PostFinance state: %s)",
+                            payment.pk,
+                            state,
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Error confirming payment %s: %s",
+                            payment.pk,
+                            e,
+                        )
+                        raise PaymentException(
+                            str(_("Payment was successful but order confirmation failed."))
+                        ) from e
             elif state in FAILURE_STATES:
                 payment.fail(info={"state": state.value if state else None})
                 logger.info(
