@@ -1047,3 +1047,237 @@ def test_api_payment_details_empty_info(env):
     assert details["state"] is None
     assert details["payment_method"] is None
     assert details["created_on"] is None
+
+
+# Test mode credentials tests
+
+
+@pytest.fixture
+def testmode_env():
+    """Create test environment with event in test mode."""
+    o = Organizer.objects.create(name="TestOrg", slug="testorg")
+    with scope(organizer=o):
+        event = Event.objects.create(
+            organizer=o,
+            name="Test Event",
+            slug="testevent",
+            date_from=now(),
+            live=False,
+            testmode=True,
+            plugins="pretix_postfinance",
+        )
+        event.settings.set("payment_postfinance_space_id", "12345")
+        event.settings.set("payment_postfinance_user_id", "67890")
+        event.settings.set("payment_postfinance_auth_key", "live-secret")
+        event.settings.set("payment_postfinance__enabled", True)
+
+        order = Order.objects.create(
+            code="TESTORDER",
+            event=event,
+            email="test@test.test",
+            status=Order.STATUS_PENDING,
+            datetime=now(),
+            expires=now() + timedelta(days=10),
+            total=Decimal("10.00"),
+            sales_channel=o.sales_channels.get(identifier="web"),
+        )
+        yield event, order
+
+
+@pytest.mark.django_db
+def test_has_test_credentials_false_when_not_configured(env):
+    """Test _has_test_credentials returns False when test credentials not set."""
+    event, _ = env
+    prov = PostFinancePaymentProvider(event)
+    assert prov._has_test_credentials() is False
+
+
+@pytest.mark.django_db
+def test_has_test_credentials_true_when_configured(env):
+    """Test _has_test_credentials returns True when all test credentials set."""
+    event, _ = env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov._has_test_credentials() is True
+
+
+@pytest.mark.django_db
+def test_has_test_credentials_false_when_partial(env):
+    """Test _has_test_credentials returns False when only some test credentials set."""
+    event, _ = env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    # user_id and auth_key not set
+
+    prov = PostFinancePaymentProvider(event)
+    assert prov._has_test_credentials() is False
+
+
+@pytest.mark.django_db
+def test_get_credentials_returns_live_when_not_testmode(env):
+    """Test _get_credentials returns live credentials when event not in test mode."""
+    event, _ = env
+    event.testmode = False
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    prov = PostFinancePaymentProvider(event)
+    space_id, user_id, auth_key = prov._get_credentials()
+
+    assert space_id == "12345"
+    assert user_id == "67890"
+    assert auth_key == "test-secret"  # This is the original live secret
+
+
+@pytest.mark.django_db
+def test_get_credentials_returns_live_when_testmode_but_no_test_creds(testmode_env):
+    """Test _get_credentials returns live credentials when in test mode but no test creds."""
+    event, _ = testmode_env
+    prov = PostFinancePaymentProvider(event)
+    space_id, user_id, auth_key = prov._get_credentials()
+
+    assert space_id == "12345"
+    assert user_id == "67890"
+    assert auth_key == "live-secret"
+
+
+@pytest.mark.django_db
+def test_get_credentials_returns_test_when_testmode_with_test_creds(testmode_env):
+    """Test _get_credentials returns test credentials when in test mode with test creds."""
+    event, _ = testmode_env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    prov = PostFinancePaymentProvider(event)
+    space_id, user_id, auth_key = prov._get_credentials()
+
+    assert space_id == "99999"
+    assert user_id == "88888"
+    assert auth_key == "test-secret"
+
+
+@pytest.mark.django_db
+def test_test_mode_message_with_test_credentials(testmode_env):
+    """Test test_mode_message indicates test credentials when configured."""
+    event, _ = testmode_env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    prov = PostFinancePaymentProvider(event)
+    message = prov.test_mode_message
+
+    assert "test credentials" in message.lower()
+    assert "no real charges" in message.lower()
+
+
+@pytest.mark.django_db
+def test_test_mode_message_without_test_credentials(testmode_env):
+    """Test test_mode_message warns about live credentials when test creds not configured."""
+    event, _ = testmode_env
+    prov = PostFinancePaymentProvider(event)
+    message = prov.test_mode_message
+
+    assert "live credentials" in message.lower()
+    assert "no test credentials" in message.lower()
+
+
+@pytest.mark.django_db
+def test_get_client_uses_test_credentials_in_testmode(testmode_env, monkeypatch):
+    """Test _get_client uses test credentials when in test mode."""
+    event, _ = testmode_env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    captured_args = {}
+
+    def mock_init(self, space_id, user_id, api_secret):
+        captured_args["space_id"] = space_id
+        captured_args["user_id"] = user_id
+        captured_args["api_secret"] = api_secret
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.__init__",
+        mock_init,
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    prov._get_client()
+
+    assert captured_args["space_id"] == 99999
+    assert captured_args["user_id"] == 88888
+    assert captured_args["api_secret"] == "test-secret"
+
+
+@pytest.mark.django_db
+def test_get_client_uses_live_credentials_when_not_testmode(env, monkeypatch):
+    """Test _get_client uses live credentials when not in test mode."""
+    event, _ = env
+    event.testmode = False
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    captured_args = {}
+
+    def mock_init(self, space_id, user_id, api_secret):
+        captured_args["space_id"] = space_id
+        captured_args["user_id"] = user_id
+        captured_args["api_secret"] = api_secret
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.__init__",
+        mock_init,
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    prov._get_client()
+
+    assert captured_args["space_id"] == 12345
+    assert captured_args["user_id"] == 67890
+    assert captured_args["api_secret"] == "test-secret"  # Original live secret
+
+
+@pytest.mark.django_db
+def test_test_connection_indicates_test_mode(testmode_env, monkeypatch):
+    """Test test_connection message indicates when using test credentials."""
+    event, _ = testmode_env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_space",
+        lambda self: MockedSpace(),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    success, message = prov.test_connection()
+
+    assert success is True
+    assert "test" in message.lower()
+    assert "Test Space" in message
+
+
+@pytest.mark.django_db
+def test_test_connection_indicates_live_mode(env, monkeypatch):
+    """Test test_connection message indicates when using live credentials."""
+    event, _ = env
+    event.testmode = False
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_space",
+        lambda self: MockedSpace(),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    success, message = prov.test_connection()
+
+    assert success is True
+    assert "live" in message.lower()
+    assert "Test Space" in message

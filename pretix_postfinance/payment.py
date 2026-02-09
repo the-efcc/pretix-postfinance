@@ -76,6 +76,57 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     execute_payment_needs_user = True
 
     @property
+    def test_mode_message(self) -> str:
+        """
+        Return a message explaining test mode behavior.
+
+        This is displayed when the payment provider is selected while
+        the event is in test mode.
+        """
+        if self._has_test_credentials():
+            return str(
+                _(
+                    "Test mode is enabled. Payments will use your test credentials "
+                    "and no real charges will be made. Configure test credentials "
+                    "in the payment settings."
+                )
+            )
+        return str(
+            _(
+                "Test mode is enabled but no test credentials are configured. "
+                "Payments will use your live credentials. Configure separate test "
+                "credentials in the payment settings to avoid real charges."
+            )
+        )
+
+    def _has_test_credentials(self) -> bool:
+        """Check if test mode credentials are configured."""
+        return bool(
+            self.settings.get("test_space_id")
+            and self.settings.get("test_user_id")
+            and self.settings.get("test_auth_key")
+        )
+
+    def _get_credentials(self) -> tuple[str | None, str | None, str | None]:
+        """
+        Get the appropriate credentials based on event test mode.
+
+        Returns test credentials if the event is in test mode and test
+        credentials are configured, otherwise returns live credentials.
+        """
+        if self.event.testmode and self._has_test_credentials():
+            return (
+                self.settings.get("test_space_id"),
+                self.settings.get("test_user_id"),
+                self.settings.get("test_auth_key"),
+            )
+        return (
+            self.settings.get("space_id"),
+            self.settings.get("user_id"),
+            self.settings.get("auth_key"),
+        )
+
+    @property
     def public_name(self) -> str:
         """
         Return the name shown to customers during checkout.
@@ -92,9 +143,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Returns a list of (id, name) tuples for use in a MultipleChoiceField.
         Returns an empty list if credentials are not configured or API call fails.
         """
-        space_id = self.settings.get("space_id")
-        user_id = self.settings.get("user_id")
-        auth_key = self.settings.get("auth_key")
+        space_id, user_id, auth_key = self._get_credentials()
 
         if not all([space_id, user_id, auth_key]):
             return []
@@ -205,6 +254,38 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     ),
                 ),
                 (
+                    "test_space_id",
+                    forms.CharField(
+                        label=_("Test Space ID"),
+                        help_text=_(
+                            "Space ID for test mode. When the event is in test mode "
+                            "and this is configured, payments will use test credentials. "
+                            "Leave empty to use live credentials in test mode."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
+                    "test_user_id",
+                    forms.CharField(
+                        label=_("Test User ID"),
+                        help_text=_(
+                            "User ID for test mode. Required if Test Space ID is set."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
+                    "test_auth_key",
+                    SecretKeySettingsField(
+                        label=_("Test Authentication key"),
+                        help_text=_(
+                            "Authentication key for test mode. Required if Test Space ID is set."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
                     "public_name",
                     forms.CharField(
                         label=_("Display Name"),
@@ -291,17 +372,21 @@ class PostFinancePaymentProvider(BasePaymentProvider):
     def _get_client(self) -> PostFinanceClient:
         """
         Create and return a PostFinance API client using the configured settings.
+
+        Uses test credentials when the event is in test mode and test
+        credentials are configured, otherwise uses live credentials.
         """
-        space_id = self.settings.get("space_id")
-        user_id = self.settings.get("user_id")
-        auth_key = self.settings.get("auth_key")
+        space_id, user_id, auth_key = self._get_credentials()
+        using_test = self.event.testmode and self._has_test_credentials()
 
         logger.debug(
-            "Creating PostFinance client for event %s: space_id=%s, user_id=%s, auth_key=%s",
+            "Creating PostFinance client for event %s: space_id=%s, user_id=%s, "
+            "auth_key=%s, test_mode=%s",
             self.event.slug,
             space_id,
             user_id,
             "***" if auth_key else "(empty)",
+            using_test,
         )
 
         return PostFinanceClient(
@@ -314,14 +399,26 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Test the connection to PostFinance API using configured credentials.
 
+        Tests with test credentials if event is in test mode and test
+        credentials are configured, otherwise uses live credentials.
+
         Returns:
             A tuple of (success: bool, message: str).
         """
-        space_id = self.settings.get("space_id")
-        user_id = self.settings.get("user_id")
-        auth_key = self.settings.get("auth_key")
+        space_id, user_id, auth_key = self._get_credentials()
+        using_test = self.event.testmode and self._has_test_credentials()
 
         if not all([space_id, user_id, auth_key]):
+            if using_test:
+                return (
+                    False,
+                    str(
+                        _(
+                            "Please configure test Space ID, User ID, and Authentication Key "
+                            "before testing the connection."
+                        )
+                    ),
+                )
             return (
                 False,
                 str(
@@ -336,12 +433,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             client = self._get_client()
             space = client.get_space()
             space_name = space.name if space.name else str(_("Unknown"))
+            mode_label = str(_("test")) if using_test else str(_("live"))
             return (
                 True,
                 str(
-                    _("Connection successful! Connected to space: {space_name}").format(
-                        space_name=space_name
-                    )
+                    _(
+                        "Connection successful! Connected to {mode} space: {space_name}"
+                    ).format(mode=mode_label, space_name=space_name)
                 ),
             )
         except PostFinanceError as e:
