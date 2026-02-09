@@ -101,6 +101,11 @@ def webhook(request: HttpRequest) -> HttpResponse:
                     return JsonResponse({"error": "Invalid signature"}, status=401)
             except PostFinanceError as e:
                 logger.error("PostFinance webhook: signature validation error - %s", e)
+                # Transient API errors should return 502 so PostFinance retries
+                if e.status_code and e.status_code >= 500:
+                    return JsonResponse(
+                        {"error": "Signature validation service unavailable"}, status=502
+                    )
                 _log_security_event("validation_error")
                 return JsonResponse({"error": "Signature validation error"}, status=401)
     else:
@@ -308,6 +313,10 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
 def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | None]:
     """
     Process a refund state update from webhook.
+
+    Note: PostFinance typically does not send separate webhooks for refund entities.
+    Refund state changes are usually reported through the parent transaction webhook.
+    This function exists as a fallback for connectors that may support refund webhooks.
 
     Returns:
         tuple[str, bool | None]: A tuple of (status, processed) where:

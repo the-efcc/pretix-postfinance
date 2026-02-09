@@ -630,9 +630,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 "error_status_code": e.status_code,
             }
             payment.save(update_fields=["info"])
-            raise PaymentException(
-                str(_("Payment processing failed: {error}")).format(error=str(e))
-            ) from e
+            user_message = _("Payment processing failed. Please try again.")
+            if e.status_code and e.status_code in ERROR_STATUS_MESSAGES:
+                user_message = ERROR_STATUS_MESSAGES[e.status_code]
+            raise PaymentException(str(user_message)) from e
 
         except Exception as e:
             logger.exception("Unexpected error during execute_payment: %s", e)
@@ -643,7 +644,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             }
             payment.save(update_fields=["info"])
             raise PaymentException(
-                str(_("An unexpected error occurred: {error}")).format(error=str(e))
+                str(_("An unexpected error occurred. Please try again."))
             ) from e
 
         finally:
@@ -850,7 +851,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "error": str(e),
                 },
             )
-            raise PaymentException(_("Refund failed: {error}").format(error=str(e))) from e
+            user_message = _("Refund failed. Please try again.")
+            if e.status_code and e.status_code in ERROR_STATUS_MESSAGES:
+                user_message = ERROR_STATUS_MESSAGES[e.status_code]
+            raise PaymentException(str(user_message)) from e
 
     def api_payment_details(self, payment: OrderPayment) -> dict:
         """
