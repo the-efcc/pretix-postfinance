@@ -1,38 +1,12 @@
-"""
-Tests for _build_line_items method in PostFinancePaymentProvider.
-"""
-
 from __future__ import annotations
 
 from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
-from django.utils.timezone import now
-from django_scopes import scope
 from postfinancecheckout.models import LineItemType
-from pretix.base.models import Event, Organizer
 
 from pretix_postfinance.payment import PostFinancePaymentProvider
-
-
-@pytest.fixture
-def env():
-    """Create test environment with organizer and event."""
-    o = Organizer.objects.create(name="Dummy", slug="dummy")
-    with scope(organizer=o):
-        event = Event.objects.create(
-            organizer=o,
-            name="Dummy",
-            slug="dummy",
-            date_from=now(),
-            live=True,
-            plugins="pretix_postfinance",
-        )
-        event.settings.set("payment_postfinance_space_id", "12345")
-        event.settings.set("payment_postfinance_user_id", "67890")
-        event.settings.set("payment_postfinance_auth_key", "test-secret")
-        yield event
 
 
 def make_position(item_name: str, price: Decimal, count: int = 1, variation: str | None = None):
@@ -60,18 +34,13 @@ def make_fee(value: Decimal, fee_type: str = "service", has_display: bool = True
     if has_display:
         fee.get_fee_type_display = MagicMock(return_value=fee_type.capitalize())
     else:
-        # Remove the method to test fallback
         del fee.get_fee_type_display
     return fee
 
 
 @pytest.mark.django_db
 class TestBuildLineItemsStandardCart:
-    """Tests for _build_line_items with standard cart scenarios."""
-
-    def test_single_item(self, env):
-        """Test cart with single item."""
-        event = env
+    def test_single_item(self, event):
         prov = PostFinancePaymentProvider(event)
 
         position = make_position("Concert Ticket", Decimal("50.00"))
@@ -85,9 +54,7 @@ class TestBuildLineItemsStandardCart:
         assert line_items[0].amount_including_tax == 50.0
         assert line_items[0].type == LineItemType.PRODUCT
 
-    def test_multiple_items(self, env):
-        """Test cart with multiple items."""
-        event = env
+    def test_multiple_items(self, event):
         prov = PostFinancePaymentProvider(event)
 
         positions = [
@@ -104,9 +71,7 @@ class TestBuildLineItemsStandardCart:
         assert line_items[1].name == "VIP Upgrade"
         assert line_items[2].name == "Merchandise"
 
-    def test_item_with_variation(self, env):
-        """Test cart with item that has a variation."""
-        event = env
+    def test_item_with_variation(self, event):
         prov = PostFinancePaymentProvider(event)
 
         position = make_position("T-Shirt", Decimal("25.00"), variation="Large")
@@ -117,9 +82,7 @@ class TestBuildLineItemsStandardCart:
         assert len(line_items) == 1
         assert line_items[0].name == "T-Shirt - Large"
 
-    def test_cart_with_fees(self, env):
-        """Test cart with fees."""
-        event = env
+    def test_cart_with_fees(self, event):
         prov = PostFinancePaymentProvider(event)
 
         position = make_position("Concert Ticket", Decimal("50.00"))
@@ -131,13 +94,11 @@ class TestBuildLineItemsStandardCart:
         assert len(line_items) == 2
         assert line_items[0].name == "Concert Ticket"
         assert line_items[0].type == LineItemType.PRODUCT
-        assert line_items[1].name == "Service"  # Capitalized by get_fee_type_display
+        assert line_items[1].name == "Service"
         assert line_items[1].type == LineItemType.FEE
         assert line_items[1].amount_including_tax == 5.0
 
-    def test_empty_positions_fallback(self, env):
-        """Test empty cart falls back to total line item."""
-        event = env
+    def test_empty_positions_fallback(self, event):
         prov = PostFinancePaymentProvider(event)
 
         cart = {"positions": [], "fees": [], "total": Decimal("100.00")}
@@ -152,11 +113,7 @@ class TestBuildLineItemsStandardCart:
 
 @pytest.mark.django_db
 class TestBuildLineItemsEdgeCases:
-    """Tests for _build_line_items edge cases."""
-
-    def test_zero_value_fee_skipped(self, env):
-        """Test that zero-value fees are skipped."""
-        event = env
+    def test_zero_value_fee_skipped(self, event):
         prov = PostFinancePaymentProvider(event)
 
         position = make_position("Concert Ticket", Decimal("50.00"))
@@ -170,16 +127,13 @@ class TestBuildLineItemsEdgeCases:
 
         line_items = prov._build_line_items(cart, "CHF")
 
-        assert len(line_items) == 2  # Only position + nonzero fee
+        assert len(line_items) == 2
         assert line_items[0].name == "Concert Ticket"
         assert line_items[1].name == "Service"
 
-    def test_grouped_positions_quantity(self, env):
-        """Test cart with grouped positions (count > 1)."""
-        event = env
+    def test_grouped_positions_quantity(self, event):
         prov = PostFinancePaymentProvider(event)
 
-        # 3 identical tickets bought together
         position = make_position("Concert Ticket", Decimal("50.00"), count=3)
         cart = {"positions": [position], "fees": [], "total": Decimal("150.00")}
 
@@ -187,19 +141,17 @@ class TestBuildLineItemsEdgeCases:
 
         assert len(line_items) == 1
         assert line_items[0].quantity == 3.0
-        assert line_items[0].amount_including_tax == 150.0  # total, not unit price
+        assert line_items[0].amount_including_tax == 150.0
 
-    def test_position_with_total_attribute(self, env):
-        """Test position uses total attribute when available."""
-        event = env
+    def test_position_with_total_attribute(self, event):
         prov = PostFinancePaymentProvider(event)
 
         pos = MagicMock()
         pos.item = MagicMock()
         pos.item.name = "Bundle"
         pos.item.pk = 1
-        pos.price = Decimal("100.00")  # Unit price
-        pos.total = Decimal("90.00")  # Discounted total
+        pos.price = Decimal("100.00")
+        pos.total = Decimal("90.00")
         pos.count = 1
         pos.variation = None
 
@@ -207,11 +159,9 @@ class TestBuildLineItemsEdgeCases:
 
         line_items = prov._build_line_items(cart, "CHF")
 
-        assert line_items[0].amount_including_tax == 90.0  # Uses total, not price
+        assert line_items[0].amount_including_tax == 90.0
 
-    def test_position_fallback_to_price(self, env):
-        """Test position falls back to price when total not available."""
-        event = env
+    def test_position_fallback_to_price(self, event):
         prov = PostFinancePaymentProvider(event)
 
         pos = MagicMock()
@@ -221,7 +171,6 @@ class TestBuildLineItemsEdgeCases:
         pos.price = Decimal("75.00")
         pos.count = 1
         pos.variation = None
-        # Remove total attribute to test fallback
         del pos.total
 
         cart = {"positions": [pos], "fees": [], "total": Decimal("75.00")}
@@ -230,9 +179,7 @@ class TestBuildLineItemsEdgeCases:
 
         assert line_items[0].amount_including_tax == 75.0
 
-    def test_fee_without_display_method(self, env):
-        """Test fee without get_fee_type_display method."""
-        event = env
+    def test_fee_without_display_method(self, event):
         prov = PostFinancePaymentProvider(event)
 
         position = make_position("Ticket", Decimal("50.00"))
@@ -242,11 +189,9 @@ class TestBuildLineItemsEdgeCases:
         line_items = prov._build_line_items(cart, "CHF")
 
         assert len(line_items) == 2
-        assert line_items[1].name == "shipping"  # Falls back to fee_type
+        assert line_items[1].name == "shipping"
 
-    def test_unique_ids_generated(self, env):
-        """Test that unique IDs are generated for each line item."""
-        event = env
+    def test_unique_ids_generated(self, event):
         prov = PostFinancePaymentProvider(event)
 
         positions = [
@@ -262,7 +207,7 @@ class TestBuildLineItemsEdgeCases:
         line_items = prov._build_line_items(cart, "CHF")
 
         unique_ids = [item.unique_id for item in line_items]
-        assert len(unique_ids) == len(set(unique_ids))  # All unique
+        assert len(unique_ids) == len(set(unique_ids))
         assert unique_ids[0].startswith("position-")
         assert unique_ids[1].startswith("position-")
         assert unique_ids[2].startswith("fee-")

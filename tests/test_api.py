@@ -1,7 +1,3 @@
-"""
-Tests for pretix_postfinance.api module.
-"""
-
 import os
 from unittest.mock import MagicMock, patch
 
@@ -16,28 +12,20 @@ from pretix_postfinance.api import (
 
 
 class TestPostFinanceError:
-    """Tests for PostFinanceError exception class."""
-
-    def test_error_with_message_only(self):
-        """Create error with message only."""
-        error = PostFinanceError("Test error")
-        assert str(error) == "Test error"
-        assert error.message == "Test error"
-        assert error.status_code is None
-        assert error.error_code is None
-
-    def test_error_with_status_code(self):
-        """Create error with status code."""
-        error = PostFinanceError("Auth failed", status_code=401)
-        assert error.status_code == 401
-        assert error.message == "Auth failed"
-
-    def test_error_with_all_attributes(self):
-        """Create error with all attributes."""
-        error = PostFinanceError("Not found", status_code=404, error_code="RESOURCE_NOT_FOUND")
-        assert error.status_code == 404
-        assert error.error_code == "RESOURCE_NOT_FOUND"
-        assert error.message == "Not found"
+    @pytest.mark.parametrize(
+        ("message", "status_code", "error_code"),
+        [
+            ("Test error", None, None),
+            ("Auth failed", 401, None),
+            ("Not found", 404, "RESOURCE_NOT_FOUND"),
+        ],
+    )
+    def test_error_attributes(self, message, status_code, error_code):
+        error = PostFinanceError(message, status_code=status_code, error_code=error_code)
+        assert str(error) == message
+        assert error.message == message
+        assert error.status_code == status_code
+        assert error.error_code == error_code
 
 
 @pytest.fixture
@@ -73,10 +61,7 @@ def mock_services():
 
 
 class TestPostFinanceClient:
-    """Tests for PostFinanceClient class."""
-
     def test_client_initialization(self, mock_services):  # noqa: ARG002
-        """Client should initialize with correct attributes."""
         client = PostFinanceClient(
             space_id=12345,
             user_id=67890,
@@ -86,16 +71,7 @@ class TestPostFinanceClient:
         assert client.user_id == 67890
         assert client.api_secret == "test-secret"
 
-    def test_default_timeout(self):
-        """Client should have 15 second default timeout (from env or default)."""
-        # Default is 15 when env var is not set
-        with patch.dict(os.environ, {}, clear=True):
-            if "PRETIX_POSTFINANCE_API_TIMEOUT" in os.environ:
-                del os.environ["PRETIX_POSTFINANCE_API_TIMEOUT"]
-            assert _get_timeout() == 15
-
     def test_get_space_success(self, mock_services, mock_space):
-        """get_space should return space details."""
         mock_spaces_instance = MagicMock()
         mock_spaces_instance.get_spaces_id.return_value = mock_space
         mock_services["SpacesService"].return_value = mock_spaces_instance
@@ -112,7 +88,6 @@ class TestPostFinanceClient:
         mock_spaces_instance.get_spaces_id.assert_called_once_with(id=12345)
 
     def test_get_space_api_exception(self, mock_services):
-        """get_space should raise PostFinanceError on API exception."""
         from postfinancecheckout.exceptions import ApiException
 
         mock_spaces_instance = MagicMock()
@@ -132,7 +107,6 @@ class TestPostFinanceClient:
         assert exc_info.value.status_code == 401
 
     def test_get_transaction_success(self, mock_services, mock_transaction):
-        """get_transaction should return transaction details."""
         mock_transactions_instance = MagicMock()
         mock_transactions_instance.get_payment_transactions_id.return_value = mock_transaction
         mock_services["TransactionsService"].return_value = mock_transactions_instance
@@ -151,7 +125,6 @@ class TestPostFinanceClient:
         )
 
     def test_get_refund_success(self, mock_services, mock_refund):
-        """get_refund should return refund details."""
         mock_refunds_instance = MagicMock()
         mock_refunds_instance.get_payment_refunds_id.return_value = mock_refund
         mock_services["RefundsService"].return_value = mock_refunds_instance
@@ -169,44 +142,19 @@ class TestPostFinanceClient:
 
 
 class TestGetTimeout:
-    """Tests for _get_timeout function."""
-
-    def test_default_when_not_set(self):
-        """Should return 15 when env var is not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            assert _get_timeout() == 15
-
-    def test_valid_value(self):
-        """Should return the configured value when valid."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "20"}):
-            assert _get_timeout() == 20
-
-    def test_invalid_non_integer(self):
-        """Should return default when value is not an integer."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "abc"}):
-            assert _get_timeout() == 15
-
-    def test_invalid_zero(self):
-        """Should return default when value is zero."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "0"}):
-            assert _get_timeout() == 15
-
-    def test_invalid_negative(self):
-        """Should return default when value is negative."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "-5"}):
-            assert _get_timeout() == 15
-
-    def test_capped_at_300(self):
-        """Should cap at 300 seconds when value exceeds maximum."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "500"}):
-            assert _get_timeout() == 300
-
-    def test_boundary_300(self):
-        """Should accept 300 as valid maximum."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "300"}):
-            assert _get_timeout() == 300
-
-    def test_boundary_1(self):
-        """Should accept 1 as valid minimum."""
-        with patch.dict(os.environ, {"PRETIX_POSTFINANCE_API_TIMEOUT": "1"}):
-            assert _get_timeout() == 1
+    @pytest.mark.parametrize(
+        ("env_vars", "expected"),
+        [
+            ({}, 15),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "20"}, 20),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "abc"}, 15),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "0"}, 15),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "-5"}, 15),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "500"}, 300),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "300"}, 300),
+            ({"PRETIX_POSTFINANCE_API_TIMEOUT": "1"}, 1),
+        ],
+    )
+    def test_timeout_values(self, env_vars, expected):
+        with patch.dict(os.environ, env_vars, clear=True):
+            assert _get_timeout() == expected

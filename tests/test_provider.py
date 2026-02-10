@@ -1,234 +1,64 @@
-"""
-Tests for the PostFinance payment provider.
-
-Inspired by pretix's Stripe plugin test suite.
-"""
-
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from decimal import Decimal
-from unittest.mock import MagicMock
 
 import pytest
-from django.test import RequestFactory
-from django.utils.timezone import now
-from django_scopes import scope
 from postfinancecheckout.models import TransactionState
-from pretix.base.models import Event, Order, OrderPayment, OrderRefund, Organizer
+from pretix.base.models import Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
 from pretix_postfinance.api import PostFinanceError
 from pretix_postfinance.payment import PostFinancePaymentProvider
 
 
-@pytest.fixture
-def env():
-    """Create test environment with organizer, event, and order."""
-    o = Organizer.objects.create(name="Dummy", slug="dummy")
-    with scope(organizer=o):
-        event = Event.objects.create(
-            organizer=o,
-            name="Dummy",
-            slug="dummy",
-            date_from=now(),
-            live=True,
-            plugins="pretix_postfinance",
-        )
-        event.settings.set("payment_postfinance_space_id", "12345")
-        event.settings.set("payment_postfinance_user_id", "67890")
-        event.settings.set("payment_postfinance_auth_key", "test-secret")
-
-        event.settings.set("payment_postfinance__enabled", True)
-
-        order = Order.objects.create(
-            code="FOOBAR",
-            event=event,
-            email="dummy@dummy.test",
-            status=Order.STATUS_PENDING,
-            datetime=now(),
-            expires=now() + timedelta(days=10),
-            total=Decimal("13.37"),
-            sales_channel=o.sales_channels.get(identifier="web"),
-        )
-        yield event, order
-
-
-@pytest.fixture(autouse=True)
-def no_messages(monkeypatch):
-    """Patch out template rendering for performance improvements."""
-    monkeypatch.setattr("django.contrib.messages.api.add_message", lambda *args, **kwargs: None)
-
-
-@pytest.fixture
-def factory():
-    """Create request factory."""
-    return RequestFactory()
-
-
-class MockedTransaction:
-    """Mock PostFinance Transaction object."""
-
-    id = 123456
-    state = TransactionState.COMPLETED
-    payment_connector_configuration = MagicMock()
-    payment_connector_configuration.name = "TWINT"
-    created_on = "2026-01-13T10:00:00Z"
-
-
-class MockedRefund:
-    """Mock PostFinance Refund object."""
-
-    id = 789012
-    state = MagicMock()
-    state.value = "SUCCESSFUL"
-    amount = 50.00
-    created_on = "2026-01-13T11:00:00Z"
-
-
-class MockedSpace:
-    """Mock PostFinance Space object."""
-
-    id = 12345
-    name = "Test Space"
-
-
-class MockedCompletion:
-    """Mock PostFinance TransactionCompletion object."""
-
-    id = 111222
-
-
-class MockedVoid:
-    """Mock PostFinance TransactionVoid object."""
-
-    id = 333444
-
-
 @pytest.mark.django_db
-def test_perform_success(env, factory, monkeypatch):
-    """Test successful payment execution."""
+@pytest.mark.parametrize(
+    "state,expected_order_status,expected_payment_state",
+    [
+        (TransactionState.COMPLETED, Order.STATUS_PAID, None),
+        (TransactionState.AUTHORIZED, Order.STATUS_PENDING, None),
+        (TransactionState.FAILED, Order.STATUS_PENDING, OrderPayment.PAYMENT_STATE_FAILED),
+        (TransactionState.DECLINE, Order.STATUS_PENDING, OrderPayment.PAYMENT_STATE_FAILED),
+    ],
+    ids=["completed", "authorized", "failed", "declined"],
+)
+def test_execute_payment_transaction_states(
+    env, rf, monkeypatch, transaction_factory, state, expected_order_status, expected_payment_state
+):
     event, order = env
-
-    def get_transaction(transaction_id):
-        t = MockedTransaction()
-        t.state = TransactionState.COMPLETED
-        return t
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction(tid),
+        lambda self, tid: transaction_factory(state=state),
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
     prov.execute_payment(req, payment)
 
     order.refresh_from_db()
-    assert order.status == Order.STATUS_PAID
+    assert order.status == expected_order_status
+
+    if expected_payment_state is not None:
+        payment.refresh_from_db()
+        assert payment.state == expected_payment_state
 
 
 @pytest.mark.django_db
-def test_perform_authorized_state_pending(env, factory, monkeypatch):
-    """Test AUTHORIZED state sets payment to pending (not confirmed - funds not captured yet)."""
+def test_execute_payment_api_error(env, rf, monkeypatch):
     event, order = env
-
-    def get_transaction(transaction_id):
-        t = MockedTransaction()
-        t.state = TransactionState.AUTHORIZED
-        return t
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction(tid),
+        lambda self, tid: (_ for _ in ()).throw(PostFinanceError("API Error", status_code=500)),
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-
-    payment = order.payments.create(provider="postfinance", amount=order.total)
-    prov.execute_payment(req, payment)
-
-    order.refresh_from_db()
-    assert order.status == Order.STATUS_PENDING
-
-
-@pytest.mark.django_db
-def test_perform_failed(env, factory, monkeypatch):
-    """Test failed payment execution."""
-    event, order = env
-
-    def get_transaction(transaction_id):
-        t = MockedTransaction()
-        t.state = TransactionState.FAILED
-        return t
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction(tid),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-
-    payment = order.payments.create(provider="postfinance", amount=order.total)
-    prov.execute_payment(req, payment)
-
-    order.refresh_from_db()
-    assert order.status == Order.STATUS_PENDING
-    payment.refresh_from_db()
-    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
-
-
-@pytest.mark.django_db
-def test_perform_declined(env, factory, monkeypatch):
-    """Test declined payment execution."""
-    event, order = env
-
-    def get_transaction(transaction_id):
-        t = MockedTransaction()
-        t.state = TransactionState.DECLINE
-        return t
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction(tid),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-
-    payment = order.payments.create(provider="postfinance", amount=order.total)
-    prov.execute_payment(req, payment)
-
-    order.refresh_from_db()
-    assert order.status == Order.STATUS_PENDING
-    payment.refresh_from_db()
-    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
-
-
-@pytest.mark.django_db
-def test_perform_api_error(env, factory, monkeypatch):
-    """Test payment execution with API error."""
-    event, order = env
-
-    def get_transaction_error(transaction_id):
-        raise PostFinanceError("API Error", status_code=500)
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction_error(tid),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
@@ -241,40 +71,28 @@ def test_perform_api_error(env, factory, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_perform_no_transaction_id(env, factory):
-    """Test payment execution without transaction ID in session."""
+def test_execute_payment_no_transaction_id(env, rf):
     event, order = env
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
     result = prov.execute_payment(req, payment)
 
-    # Should return None without raising exception
     assert result is None
     payment.refresh_from_db()
     assert payment.info_data.get("error") == "No transaction ID in session"
 
 
 @pytest.mark.django_db
-def test_refund_success(env, factory, monkeypatch):
-    """Test successful refund execution."""
+def test_refund_success(env, rf, monkeypatch, refund_factory):
     event, order = env
-
-    def refund_transaction(*args, **kwargs):
-        r = MockedRefund()
-        r.id = 789012
-        r.state = MagicMock()
-        r.state.value = "SUCCESSFUL"
-        r.amount = 13.37
-        r.created_on = "2026-01-13T11:00:00Z"
-        return r
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
-        lambda self, **kwargs: refund_transaction(**kwargs),
+        lambda self, **kwargs: refund_factory(state="SUCCESSFUL", amount=13.37),
     )
 
     order.status = Order.STATUS_PAID
@@ -305,22 +123,12 @@ def test_refund_success(env, factory, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_refund_partial(env, factory, monkeypatch):
-    """Test partial refund execution."""
+def test_refund_partial(env, rf, monkeypatch, refund_factory):
     event, order = env
-
-    def refund_transaction(*args, **kwargs):
-        r = MockedRefund()
-        r.id = 789012
-        r.state = MagicMock()
-        r.state.value = "SUCCESSFUL"
-        r.amount = 5.00
-        r.created_on = "2026-01-13T11:00:00Z"
-        return r
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
-        lambda self, **kwargs: refund_transaction(**kwargs),
+        lambda self, **kwargs: refund_factory(state="SUCCESSFUL", amount=5.00),
     )
 
     order.status = Order.STATUS_PAID
@@ -348,22 +156,20 @@ def test_refund_partial(env, factory, monkeypatch):
 
     refund.refresh_from_db()
     assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
-    # Refund info is stored on the refund object
     assert refund.info_data.get("refund_id") == 789012
     assert refund.info_data.get("state") == "SUCCESSFUL"
 
 
 @pytest.mark.django_db
-def test_refund_api_error(env, factory, monkeypatch):
-    """Test refund with API error."""
+def test_refund_api_error(env, rf, monkeypatch):
     event, order = env
 
-    def refund_error(*args, **kwargs):
+    def raise_refund_error(**kwargs):
         raise PostFinanceError("Refund failed", status_code=400)
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
-        lambda self, **kwargs: refund_error(**kwargs),
+        lambda self, **kwargs: raise_refund_error(**kwargs),
     )
 
     order.status = Order.STATUS_PAID
@@ -392,14 +198,12 @@ def test_refund_api_error(env, factory, monkeypatch):
 
     refund.refresh_from_db()
     assert refund.state != OrderRefund.REFUND_STATE_DONE
-    # Verify error details are stored in refund.info
     assert refund.info_data.get("error") == "Refund failed"
     assert refund.info_data.get("error_status_code") == 400
 
 
 @pytest.mark.django_db
-def test_refund_wrong_state(env, factory):
-    """Test refund when transaction is not in refundable state."""
+def test_refund_wrong_state(env, rf):
     event, order = env
 
     order.status = Order.STATUS_PAID
@@ -411,7 +215,7 @@ def test_refund_wrong_state(env, factory):
         info=json.dumps(
             {
                 "transaction_id": 123456,
-                "state": TransactionState.AUTHORIZED.value,  # Not refundable
+                "state": TransactionState.AUTHORIZED.value,
             }
         ),
     )
@@ -430,16 +234,12 @@ def test_refund_wrong_state(env, factory):
 
 
 @pytest.mark.django_db
-def test_test_connection_success(env, monkeypatch):
-    """Test successful connection test."""
+def test_test_connection_success(env, monkeypatch, space_factory):
     event, _ = env
-
-    def get_space():
-        return MockedSpace()
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_space",
-        lambda self: get_space(),
+        lambda self: space_factory(),
     )
 
     prov = PostFinancePaymentProvider(event)
@@ -451,15 +251,11 @@ def test_test_connection_success(env, monkeypatch):
 
 @pytest.mark.django_db
 def test_test_connection_auth_error(env, monkeypatch):
-    """Test connection test with authentication error."""
     event, _ = env
-
-    def get_space_error():
-        raise PostFinanceError("Unauthorized", status_code=401)
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_space",
-        lambda self: get_space_error(),
+        lambda self: (_ for _ in ()).throw(PostFinanceError("Unauthorized", status_code=401)),
     )
 
     prov = PostFinancePaymentProvider(event)
@@ -471,10 +267,8 @@ def test_test_connection_auth_error(env, monkeypatch):
 
 @pytest.mark.django_db
 def test_test_connection_missing_credentials(env):
-    """Test connection test with missing credentials."""
     event, _ = env
 
-    # Clear credentials
     event.settings.set("payment_postfinance_space_id", "")
     event.settings.set("payment_postfinance_user_id", "")
     event.settings.set("payment_postfinance_auth_key", "")
@@ -487,58 +281,48 @@ def test_test_connection_missing_credentials(env):
 
 
 @pytest.mark.django_db
-def test_payment_refund_supported(env):
-    """Test payment_refund_supported returns correct value."""
+@pytest.mark.parametrize(
+    "state,expected",
+    [
+        (TransactionState.COMPLETED.value, True),
+        (TransactionState.FULFILL.value, True),
+        (TransactionState.AUTHORIZED.value, False),
+    ],
+    ids=["completed", "fulfill", "authorized"],
+)
+def test_payment_refund_supported(env, state, expected):
     event, order = env
 
     prov = PostFinancePaymentProvider(event)
 
-    # Should be supported for COMPLETED state
     payment = order.payments.create(
         provider="postfinance",
         amount=order.total,
-        info=json.dumps({"state": TransactionState.COMPLETED.value}),
+        info=json.dumps({"state": state}),
     )
-    assert prov.payment_refund_supported(payment) is True
-
-    # Should be supported for FULFILL state
-    payment2 = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps({"state": TransactionState.FULFILL.value}),
-    )
-    assert prov.payment_refund_supported(payment2) is True
-
-    # Should not be supported for AUTHORIZED state
-    payment3 = order.payments.create(
-        provider="postfinance",
-        amount=order.total,
-        info=json.dumps({"state": TransactionState.AUTHORIZED.value}),
-    )
-    assert prov.payment_refund_supported(payment3) is False
+    assert prov.payment_refund_supported(payment) is expected
 
 
 @pytest.mark.django_db
-def test_payment_is_valid_session(env, factory):
-    """Test payment_is_valid_session checks for transaction ID."""
+@pytest.mark.parametrize(
+    "session,expected",
+    [
+        ({"payment_postfinance_transaction_id": 123456}, True),
+        ({}, False),
+    ],
+    ids=["with_transaction_id", "without_transaction_id"],
+)
+def test_payment_is_valid_session(env, rf, session, expected):
     event, _ = env
 
     prov = PostFinancePaymentProvider(event)
-
-    # Valid session with transaction ID
-    req = factory.get("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-    assert prov.payment_is_valid_session(req) is True
-
-    # Invalid session without transaction ID
-    req2 = factory.get("/")
-    req2.session = {}
-    assert prov.payment_is_valid_session(req2) is False
+    req = rf.get("/")
+    req.session = session
+    assert prov.payment_is_valid_session(req) is expected
 
 
 @pytest.mark.django_db
 def test_matching_id(env):
-    """Test matching_id returns transaction ID."""
     event, order = env
 
     prov = PostFinancePaymentProvider(event)
@@ -554,7 +338,6 @@ def test_matching_id(env):
 
 @pytest.mark.django_db
 def test_shred_payment_info(env):
-    """Test shred_payment_info removes sensitive data."""
     event, order = env
 
     prov = PostFinancePaymentProvider(event)
@@ -585,7 +368,6 @@ def test_shred_payment_info(env):
 
 @pytest.mark.django_db
 def test_api_refund_details(env):
-    """Test api_refund_details returns correct data."""
     event, order = env
 
     order.status = Order.STATUS_PAID
@@ -622,7 +404,6 @@ def test_api_refund_details(env):
 
 @pytest.mark.django_db
 def test_api_refund_details_with_error(env):
-    """Test api_refund_details includes error fields when present."""
     event, order = env
 
     order.status = Order.STATUS_PAID
@@ -660,8 +441,15 @@ def test_api_refund_details_with_error(env):
 
 
 @pytest.mark.django_db
-def test_refund_control_render_short(env):
-    """Test refund_control_render_short returns correct format."""
+@pytest.mark.parametrize(
+    "refund_info,expected",
+    [
+        ({"refund_id": 789012}, "PostFinance (789012)"),
+        ({}, "PostFinance"),
+    ],
+    ids=["with_refund_id", "without_refund_id"],
+)
+def test_refund_control_render_short(env, refund_info, expected):
     event, order = env
 
     order.status = Order.STATUS_PAID
@@ -673,123 +461,65 @@ def test_refund_control_render_short(env):
         info=json.dumps({"transaction_id": 123456}),
     )
 
-    # With refund ID
     refund = order.refunds.create(
         provider="postfinance",
         amount=order.total,
         payment=payment,
-        info=json.dumps({"refund_id": 789012}),
+        info=json.dumps(refund_info),
     )
 
     prov = PostFinancePaymentProvider(event)
-    result = prov.refund_control_render_short(refund)
-
-    assert result == "PostFinance (789012)"
-
-    # Without refund ID
-    refund2 = order.refunds.create(
-        provider="postfinance",
-        amount=order.total,
-        payment=payment,
-        info=json.dumps({}),
-    )
-
-    result2 = prov.refund_control_render_short(refund2)
-    assert result2 == "PostFinance"
-
-
-# Session cleanup tests
+    assert prov.refund_control_render_short(refund) == expected
 
 
 @pytest.mark.django_db
-def test_execute_payment_cleans_session_on_success(env, factory, monkeypatch):
-    """Test that session is cleaned up after successful payment."""
+@pytest.mark.parametrize(
+    "error_type,exception",
+    [
+        ("success", None),
+        ("api_error", PostFinanceError("API Error", status_code=500)),
+        ("generic_error", RuntimeError("Unexpected error")),
+    ],
+    ids=["success", "api_error", "generic_exception"],
+)
+def test_execute_payment_cleans_session(
+    env, rf, monkeypatch, transaction_factory, error_type, exception
+):
     event, order = env
 
-    def get_transaction(transaction_id):
-        t = MockedTransaction()
-        t.state = TransactionState.COMPLETED
-        return t
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction(tid),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-
-    payment = order.payments.create(provider="postfinance", amount=order.total)
-    prov.execute_payment(req, payment)
-
-    # Session should be cleaned up
-    assert "payment_postfinance_transaction_id" not in req.session
-
-
-@pytest.mark.django_db
-def test_execute_payment_cleans_session_on_api_error(env, factory, monkeypatch):
-    """Test that session is cleaned up when API error occurs."""
-    event, order = env
-
-    def get_transaction_error(transaction_id):
-        raise PostFinanceError("API Error", status_code=500)
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction_error(tid),
-    )
+    if exception:
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+            lambda self, tid: (_ for _ in ()).throw(exception),
+        )
+    else:
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+            lambda self, tid: transaction_factory(state=TransactionState.COMPLETED),
+        )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
 
-    with pytest.raises(PaymentException):
+    if exception:
+        with pytest.raises(PaymentException):
+            prov.execute_payment(req, payment)
+    else:
         prov.execute_payment(req, payment)
 
-    # Session should still be cleaned up even after error
     assert "payment_postfinance_transaction_id" not in req.session
 
 
 @pytest.mark.django_db
-def test_execute_payment_cleans_session_on_generic_exception(env, factory, monkeypatch):
-    """Test that session is cleaned up when generic exception occurs."""
+def test_checkout_prepare_clears_stale_session(env, rf, monkeypatch, transaction_factory):
     event, order = env
-
-    def get_transaction_error(transaction_id):
-        raise RuntimeError("Unexpected error")
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: get_transaction_error(tid),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-
-    payment = order.payments.create(provider="postfinance", amount=order.total)
-
-    with pytest.raises(PaymentException):
-        prov.execute_payment(req, payment)
-
-    # Session should still be cleaned up even after error
-    assert "payment_postfinance_transaction_id" not in req.session
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_clears_stale_session(env, factory, monkeypatch):
-    """Test that checkout_prepare clears any stale transaction ID at start."""
-    event, order = env
-
-    created_transaction = MockedTransaction()
-    created_transaction.id = 999888
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: created_transaction,
+        lambda self, **kwargs: transaction_factory(id=999888),
     )
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
@@ -797,93 +527,77 @@ def test_checkout_prepare_clears_stale_session(env, factory, monkeypatch):
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}  # Stale ID
+    req = rf.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}
     req.event = event
 
     cart = {"total": order.total, "positions": [], "fees": []}
     result = prov.checkout_prepare(req, cart)
 
-    # Should return payment URL
     assert result == "https://checkout.postfinance.ch/pay/999888"
-    # Session should have new transaction ID, not the stale one
     assert req.session.get("payment_postfinance_transaction_id") == 999888
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_cleans_session_on_payment_url_failure(env, factory, monkeypatch):
-    """Test that session is cleaned when get_payment_page_url fails."""
+def test_checkout_prepare_cleans_session_on_payment_url_failure(
+    env, rf, monkeypatch, transaction_factory
+):
     event, order = env
-
-    created_transaction = MockedTransaction()
-    created_transaction.id = 999888
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: created_transaction,
+        lambda self, **kwargs: transaction_factory(id=999888),
     )
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: None,  # Simulate failure
+        lambda self, tid: None,
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
     req.event = event
-    req._messages = []  # Mock messages
+    req._messages = []
 
     cart = {"total": order.total, "positions": [], "fees": []}
     result = prov.checkout_prepare(req, cart)
 
-    # Should return False
     assert result is False
-    # Session should be cleaned up
     assert "payment_postfinance_transaction_id" not in req.session
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_cleans_session_on_api_error(env, factory, monkeypatch):
-    """Test that session is cleaned when API error occurs during checkout_prepare."""
+def test_checkout_prepare_cleans_session_on_api_error(env, rf, monkeypatch):
     event, order = env
 
-    def create_transaction_error(**kwargs):
+    def raise_api_error(**kwargs):
         raise PostFinanceError("API Error", status_code=500)
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: create_transaction_error(**kwargs),
+        lambda self, **kwargs: raise_api_error(**kwargs),
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}  # Pre-existing
+    req = rf.post("/")
+    req.session = {"payment_postfinance_transaction_id": 123456}
     req.event = event
-    req._messages = []  # Mock messages
+    req._messages = []
 
     cart = {"total": order.total, "positions": [], "fees": []}
     result = prov.checkout_prepare(req, cart)
 
-    # Should return False
     assert result is False
-    # Session should be cleaned up
     assert "payment_postfinance_transaction_id" not in req.session
 
 
-# Additional checkout prepare tests
-
-
 @pytest.mark.django_db
-def test_checkout_prepare_success(env, factory, monkeypatch):
-    """Test successful checkout_prepare returns payment URL."""
+def test_checkout_prepare_success(env, rf, monkeypatch, transaction_factory):
     event, order = env
-
-    created_transaction = MockedTransaction()
-    created_transaction.id = 999888
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: created_transaction,
+        lambda self, **kwargs: transaction_factory(id=999888),
     )
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
@@ -891,31 +605,26 @@ def test_checkout_prepare_success(env, factory, monkeypatch):
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
     req.event = event
 
     cart = {"total": order.total, "positions": [], "fees": []}
     result = prov.checkout_prepare(req, cart)
 
-    # Should return payment URL
     assert result == "https://checkout.postfinance.ch/pay/999888"
-    # Transaction ID should be stored in session
     assert req.session.get("payment_postfinance_transaction_id") == 999888
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_passes_line_items(env, factory, monkeypatch):
-    """Test that checkout_prepare passes correct line items to API."""
+def test_checkout_prepare_passes_line_items(env, rf, monkeypatch, transaction_factory):
     event, order = env
 
     captured_kwargs = {}
 
     def capture_create_transaction(**kwargs):
         captured_kwargs.update(kwargs)
-        t = MockedTransaction()
-        t.id = 999888
-        return t
+        return transaction_factory(id=999888)
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
@@ -927,30 +636,26 @@ def test_checkout_prepare_passes_line_items(env, factory, monkeypatch):
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
     req.event = event
 
     cart = {"total": order.total, "positions": [], "fees": []}
     prov.checkout_prepare(req, cart)
 
-    # Verify line items were passed
     assert "line_items" in captured_kwargs
-    assert len(captured_kwargs["line_items"]) == 1  # Fallback to order total
+    assert len(captured_kwargs["line_items"]) == 1
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_passes_allowed_payment_methods(env, factory, monkeypatch):
-    """Test that allowed payment methods are passed to API."""
+def test_checkout_prepare_passes_allowed_payment_methods(env, rf, monkeypatch, transaction_factory):
     event, order = env
 
     captured_kwargs = {}
 
     def capture_create_transaction(**kwargs):
         captured_kwargs.update(kwargs)
-        t = MockedTransaction()
-        t.id = 999888
-        return t
+        return transaction_factory(id=999888)
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
@@ -962,10 +667,9 @@ def test_checkout_prepare_passes_allowed_payment_methods(env, factory, monkeypat
     )
 
     prov = PostFinancePaymentProvider(event)
-    # Mock the _parse_allowed_payment_methods to return specific values
     monkeypatch.setattr(prov, "_parse_allowed_payment_methods", lambda: [101, 102])
 
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
     req.event = event
 
@@ -976,20 +680,16 @@ def test_checkout_prepare_passes_allowed_payment_methods(env, factory, monkeypat
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_transaction_missing_id(env, factory, monkeypatch):
-    """Test checkout_prepare returns False when transaction has no ID."""
+def test_checkout_prepare_transaction_missing_id(env, rf, monkeypatch, transaction_factory):
     event, order = env
-
-    created_transaction = MockedTransaction()
-    created_transaction.id = None  # No ID
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: created_transaction,
+        lambda self, **kwargs: transaction_factory(id=None),
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = factory.post("/")
+    req = rf.post("/")
     req.session = {}
     req.event = event
 
@@ -999,12 +699,8 @@ def test_checkout_prepare_transaction_missing_id(env, factory, monkeypatch):
     assert result is False
 
 
-# API payment details tests
-
-
 @pytest.mark.django_db
 def test_api_payment_details(env):
-    """Test api_payment_details returns correct data."""
     event, order = env
 
     payment = order.payments.create(
@@ -1031,7 +727,6 @@ def test_api_payment_details(env):
 
 @pytest.mark.django_db
 def test_api_payment_details_empty_info(env):
-    """Test api_payment_details handles empty info_data."""
     event, order = env
 
     payment = order.payments.create(
@@ -1049,75 +744,34 @@ def test_api_payment_details_empty_info(env):
     assert details["created_on"] is None
 
 
-# Test mode credentials tests
-
-
-@pytest.fixture
-def testmode_env():
-    """Create test environment with event in test mode."""
-    o = Organizer.objects.create(name="TestOrg", slug="testorg")
-    with scope(organizer=o):
-        event = Event.objects.create(
-            organizer=o,
-            name="Test Event",
-            slug="testevent",
-            date_from=now(),
-            live=False,
-            testmode=True,
-            plugins="pretix_postfinance",
-        )
-        event.settings.set("payment_postfinance_space_id", "12345")
-        event.settings.set("payment_postfinance_user_id", "67890")
-        event.settings.set("payment_postfinance_auth_key", "live-secret")
-        event.settings.set("payment_postfinance__enabled", True)
-
-        order = Order.objects.create(
-            code="TESTORDER",
-            event=event,
-            email="test@test.test",
-            status=Order.STATUS_PENDING,
-            datetime=now(),
-            expires=now() + timedelta(days=10),
-            total=Decimal("10.00"),
-            sales_channel=o.sales_channels.get(identifier="web"),
-        )
-        yield event, order
-
-
 @pytest.mark.django_db
-def test_has_test_credentials_false_when_not_configured(env):
-    """Test _has_test_credentials returns False when test credentials not set."""
+@pytest.mark.parametrize(
+    "test_creds,expected",
+    [
+        ({}, False),
+        (
+            {
+                "payment_postfinance_test_space_id": "99999",
+                "payment_postfinance_test_user_id": "88888",
+                "payment_postfinance_test_auth_key": "test-secret",
+            },
+            True,
+        ),
+        ({"payment_postfinance_test_space_id": "99999"}, False),
+    ],
+    ids=["not_configured", "fully_configured", "partial"],
+)
+def test_has_test_credentials(env, test_creds, expected):
     event, _ = env
-    prov = PostFinancePaymentProvider(event)
-    assert prov._has_test_credentials() is False
-
-
-@pytest.mark.django_db
-def test_has_test_credentials_true_when_configured(env):
-    """Test _has_test_credentials returns True when all test credentials set."""
-    event, _ = env
-    event.settings.set("payment_postfinance_test_space_id", "99999")
-    event.settings.set("payment_postfinance_test_user_id", "88888")
-    event.settings.set("payment_postfinance_test_auth_key", "test-secret")
+    for key, value in test_creds.items():
+        event.settings.set(key, value)
 
     prov = PostFinancePaymentProvider(event)
-    assert prov._has_test_credentials() is True
-
-
-@pytest.mark.django_db
-def test_has_test_credentials_false_when_partial(env):
-    """Test _has_test_credentials returns False when only some test credentials set."""
-    event, _ = env
-    event.settings.set("payment_postfinance_test_space_id", "99999")
-    # user_id and auth_key not set
-
-    prov = PostFinancePaymentProvider(event)
-    assert prov._has_test_credentials() is False
+    assert prov._has_test_credentials() is expected
 
 
 @pytest.mark.django_db
 def test_get_credentials_returns_live_when_not_testmode(env):
-    """Test _get_credentials returns live credentials when event not in test mode."""
     event, _ = env
     event.testmode = False
     event.settings.set("payment_postfinance_test_space_id", "99999")
@@ -1129,12 +783,11 @@ def test_get_credentials_returns_live_when_not_testmode(env):
 
     assert space_id == "12345"
     assert user_id == "67890"
-    assert auth_key == "test-secret"  # This is the original live secret
+    assert auth_key == "test-secret"
 
 
 @pytest.mark.django_db
 def test_get_credentials_returns_live_when_testmode_but_no_test_creds(testmode_env):
-    """Test _get_credentials returns live credentials when in test mode but no test creds."""
     event, _ = testmode_env
     prov = PostFinancePaymentProvider(event)
     space_id, user_id, auth_key = prov._get_credentials()
@@ -1146,7 +799,6 @@ def test_get_credentials_returns_live_when_testmode_but_no_test_creds(testmode_e
 
 @pytest.mark.django_db
 def test_get_credentials_returns_test_when_testmode_with_test_creds(testmode_env):
-    """Test _get_credentials returns test credentials when in test mode with test creds."""
     event, _ = testmode_env
     event.settings.set("payment_postfinance_test_space_id", "99999")
     event.settings.set("payment_postfinance_test_user_id", "88888")
@@ -1162,7 +814,6 @@ def test_get_credentials_returns_test_when_testmode_with_test_creds(testmode_env
 
 @pytest.mark.django_db
 def test_test_mode_message_with_test_credentials(testmode_env):
-    """Test test_mode_message indicates test credentials when configured."""
     event, _ = testmode_env
     event.settings.set("payment_postfinance_test_space_id", "99999")
     event.settings.set("payment_postfinance_test_user_id", "88888")
@@ -1177,7 +828,6 @@ def test_test_mode_message_with_test_credentials(testmode_env):
 
 @pytest.mark.django_db
 def test_test_mode_message_without_test_credentials(testmode_env):
-    """Test test_mode_message warns about live credentials when test creds not configured."""
     event, _ = testmode_env
     prov = PostFinancePaymentProvider(event)
     message = prov.test_mode_message
@@ -1188,7 +838,6 @@ def test_test_mode_message_without_test_credentials(testmode_env):
 
 @pytest.mark.django_db
 def test_get_client_uses_test_credentials_in_testmode(testmode_env, monkeypatch):
-    """Test _get_client uses test credentials when in test mode."""
     event, _ = testmode_env
     event.settings.set("payment_postfinance_test_space_id", "99999")
     event.settings.set("payment_postfinance_test_user_id", "88888")
@@ -1216,7 +865,6 @@ def test_get_client_uses_test_credentials_in_testmode(testmode_env, monkeypatch)
 
 @pytest.mark.django_db
 def test_get_client_uses_live_credentials_when_not_testmode(env, monkeypatch):
-    """Test _get_client uses live credentials when not in test mode."""
     event, _ = env
     event.testmode = False
     event.settings.set("payment_postfinance_test_space_id", "99999")
@@ -1240,12 +888,11 @@ def test_get_client_uses_live_credentials_when_not_testmode(env, monkeypatch):
 
     assert captured_args["space_id"] == 12345
     assert captured_args["user_id"] == 67890
-    assert captured_args["api_secret"] == "test-secret"  # Original live secret
+    assert captured_args["api_secret"] == "test-secret"
 
 
 @pytest.mark.django_db
-def test_test_connection_indicates_test_mode(testmode_env, monkeypatch):
-    """Test test_connection message indicates when using test credentials."""
+def test_test_connection_indicates_test_mode(testmode_env, monkeypatch, space_factory):
     event, _ = testmode_env
     event.settings.set("payment_postfinance_test_space_id", "99999")
     event.settings.set("payment_postfinance_test_user_id", "88888")
@@ -1253,7 +900,7 @@ def test_test_connection_indicates_test_mode(testmode_env, monkeypatch):
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_space",
-        lambda self: MockedSpace(),
+        lambda self: space_factory(),
     )
 
     prov = PostFinancePaymentProvider(event)
@@ -1265,14 +912,13 @@ def test_test_connection_indicates_test_mode(testmode_env, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_test_connection_indicates_live_mode(env, monkeypatch):
-    """Test test_connection message indicates when using live credentials."""
+def test_test_connection_indicates_live_mode(env, monkeypatch, space_factory):
     event, _ = env
     event.testmode = False
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_space",
-        lambda self: MockedSpace(),
+        lambda self: space_factory(),
     )
 
     prov = PostFinancePaymentProvider(event)

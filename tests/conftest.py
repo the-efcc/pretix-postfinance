@@ -1,24 +1,23 @@
-"""
-Pytest fixtures and configuration for pretix-postfinance tests.
-"""
-
 import inspect
 import os
 
-# Set testing environment
 os.environ["PRETIX_POSTFINANCE_TESTING"] = "1"
 
+from datetime import timedelta
+from decimal import Decimal
+from unittest.mock import MagicMock
+
 import pytest
+from django.test import RequestFactory
 from django.utils import translation
+from django.utils.timezone import now
 from django_scopes import scopes_disabled
+from postfinancecheckout.models import TransactionState
+from pretix.base.models import Event, Order, Organizer
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_fixture_setup(fixturedef, request):
-    """
-    This hack automatically disables django-scopes for all fixtures which are not yield fixtures.
-    This saves us a *lot* of decorators.
-    """
     if inspect.isgeneratorfunction(fixturedef.func):
         yield
     else:
@@ -28,24 +27,176 @@ def pytest_fixture_setup(fixturedef, request):
 
 @pytest.fixture(autouse=True)
 def reset_locale():
-    """Reset locale to English for each test."""
     translation.activate("en")
 
 
 @pytest.fixture(autouse=True)
 def no_messages(monkeypatch):
-    """Patch out messages for performance improvements."""
     monkeypatch.setattr("django.contrib.messages.api.add_message", lambda *args, **kwargs: None)
 
 
-# Mock fixtures for API tests
-from decimal import Decimal
-from unittest.mock import MagicMock
+@pytest.fixture(autouse=True)
+def disable_scopes():
+    with scopes_disabled():
+        yield
+
+
+# Request factory
+
+
+@pytest.fixture
+def rf():
+    return RequestFactory()
+
+
+# Database fixtures
+
+
+@pytest.fixture
+def organizer():
+    return Organizer.objects.create(name="Dummy", slug="dummy")
+
+
+@pytest.fixture
+def event(organizer):
+    event = Event.objects.create(
+        organizer=organizer,
+        name="Dummy",
+        slug="dummy",
+        date_from=now(),
+        live=True,
+        plugins="pretix_postfinance",
+    )
+    event.settings.set("payment_postfinance_space_id", "12345")
+    event.settings.set("payment_postfinance_user_id", "67890")
+    event.settings.set("payment_postfinance_auth_key", "test-secret")
+    event.settings.set("payment_postfinance__enabled", True)
+    return event
+
+
+@pytest.fixture
+def order(event, organizer):
+    return Order.objects.create(
+        code="FOOBAR",
+        event=event,
+        email="dummy@dummy.test",
+        status=Order.STATUS_PENDING,
+        datetime=now(),
+        expires=now() + timedelta(days=10),
+        total=Decimal("13.37"),
+        sales_channel=organizer.sales_channels.get(identifier="web"),
+    )
+
+
+@pytest.fixture
+def env(event, order):
+    return event, order
+
+
+# Test mode fixtures
+
+
+@pytest.fixture
+def testmode_organizer():
+    return Organizer.objects.create(name="TestOrg", slug="testorg")
+
+
+@pytest.fixture
+def testmode_event(testmode_organizer):
+    event = Event.objects.create(
+        organizer=testmode_organizer,
+        name="Test Event",
+        slug="testevent",
+        date_from=now(),
+        live=False,
+        testmode=True,
+        plugins="pretix_postfinance",
+    )
+    event.settings.set("payment_postfinance_space_id", "12345")
+    event.settings.set("payment_postfinance_user_id", "67890")
+    event.settings.set("payment_postfinance_auth_key", "live-secret")
+    event.settings.set("payment_postfinance__enabled", True)
+    return event
+
+
+@pytest.fixture
+def testmode_order(testmode_event, testmode_organizer):
+    return Order.objects.create(
+        code="TESTORDER",
+        event=testmode_event,
+        email="test@test.test",
+        status=Order.STATUS_PENDING,
+        datetime=now(),
+        expires=now() + timedelta(days=10),
+        total=Decimal("10.00"),
+        sales_channel=testmode_organizer.sales_channels.get(identifier="web"),
+    )
+
+
+@pytest.fixture
+def testmode_env(testmode_event, testmode_order):
+    return testmode_event, testmode_order
+
+
+# Factory fixtures
+
+
+@pytest.fixture
+def transaction_factory():
+    def _create(
+        id: int = 123456,
+        state: TransactionState = TransactionState.COMPLETED,
+        payment_method: str = "TWINT",
+        created_on: str = "2026-01-13T10:00:00Z",
+        amount: float = 100.00,
+    ):
+        transaction = MagicMock()
+        transaction.id = id
+        transaction.state = state
+        transaction.created_on = created_on
+        transaction.amount = amount
+        transaction.payment_connector_configuration = MagicMock()
+        transaction.payment_connector_configuration.name = payment_method
+        return transaction
+
+    return _create
+
+
+@pytest.fixture
+def refund_factory():
+    def _create(
+        id: int = 789012,
+        state: str = "SUCCESSFUL",
+        amount: float = 50.00,
+        created_on: str = "2026-01-13T11:00:00Z",
+    ):
+        refund = MagicMock()
+        refund.id = id
+        refund.state = MagicMock()
+        refund.state.value = state
+        refund.amount = amount
+        refund.created_on = created_on
+        return refund
+
+    return _create
+
+
+@pytest.fixture
+def space_factory():
+    def _create(id: int = 12345, name: str = "Test Space"):
+        space = MagicMock()
+        space.id = id
+        space.name = name
+        return space
+
+    return _create
+
+
+# Convenience fixtures using factories
 
 
 @pytest.fixture
 def mock_postfinance_config():
-    """Mock PostFinance configuration settings."""
     return {
         "space_id": "12345",
         "user_id": "67890",
@@ -54,43 +205,22 @@ def mock_postfinance_config():
 
 
 @pytest.fixture
-def mock_transaction():
-    """Mock PostFinance Transaction object."""
-    transaction = MagicMock()
-    transaction.id = 123456
-    transaction.state = MagicMock()
-    transaction.state.value = "COMPLETED"
-    transaction.created_on = "2026-01-13T10:00:00Z"
-    transaction.payment_connector_configuration = MagicMock()
-    transaction.payment_connector_configuration.name = "TWINT"
-    transaction.amount = 100.00
-    return transaction
+def mock_transaction(transaction_factory):
+    return transaction_factory()
 
 
 @pytest.fixture
-def mock_refund():
-    """Mock PostFinance Refund object."""
-    refund = MagicMock()
-    refund.id = 789012
-    refund.state = MagicMock()
-    refund.state.value = "SUCCESSFUL"
-    refund.amount = 50.00
-    refund.created_on = "2026-01-13T11:00:00Z"
-    return refund
+def mock_refund(refund_factory):
+    return refund_factory()
 
 
 @pytest.fixture
-def mock_space():
-    """Mock PostFinance Space object."""
-    space = MagicMock()
-    space.id = 12345
-    space.name = "Test Space"
-    return space
+def mock_space(space_factory):
+    return space_factory()
 
 
 @pytest.fixture
 def mock_order_payment():
-    """Mock pretix OrderPayment object."""
     payment = MagicMock()
     payment.pk = 1
     payment.amount = Decimal("100.00")
@@ -107,7 +237,6 @@ def mock_order_payment():
 
 @pytest.fixture
 def mock_request():
-    """Mock Django HttpRequest object."""
     request = MagicMock()
     request.session = {}
     request.META = {"CSRF_COOKIE": "test-csrf-token"}
@@ -120,7 +249,6 @@ def mock_request():
 
 @pytest.fixture
 def mock_event():
-    """Mock pretix Event object."""
     event = MagicMock()
     event.slug = "test-event"
     event.currency = "CHF"
