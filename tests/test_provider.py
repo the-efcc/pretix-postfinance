@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from postfinancecheckout.models import TransactionState
@@ -83,7 +84,7 @@ def test_execute_payment_no_transaction_id(env, rf):
 
     assert result is None
     payment.refresh_from_db()
-    assert payment.info_data.get("error") == "No transaction ID in session"
+    assert payment.info_data.get("error") == "No transaction ID available"
 
 
 @pytest.mark.django_db
@@ -319,6 +320,113 @@ def test_payment_is_valid_session(env, rf, session, expected):
     req = rf.get("/")
     req.session = session
     assert prov.payment_is_valid_session(req) is expected
+
+
+@pytest.mark.django_db
+def test_payment_is_valid_session_accepts_persisted_transaction(env, rf):
+    event, order = env
+
+    prov = PostFinancePaymentProvider(event)
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"pending_transaction_id": 654321}),
+    )
+
+    req = rf.get("/")
+    req.session = {}
+    req.resolver_match = SimpleNamespace(kwargs={"payment": payment.pk})
+
+    assert prov.payment_is_valid_session(req) is True
+
+
+@pytest.mark.django_db
+def test_payment_prepare_persists_transaction_on_payment(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: transaction_factory(id=999888),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.post("/")
+    req.session = {}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    result = prov.payment_prepare(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    payment.refresh_from_db()
+    assert payment.info_data.get("pending_transaction_id") == 999888
+
+
+@pytest.mark.django_db
+def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: transaction_factory(id=999888),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: None,
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.post("/")
+    req.session = {}
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"pending_transaction_id": 123456, "other": "keep"}),
+    )
+    result = prov.payment_prepare(req, payment)
+
+    assert result is False
+    payment.refresh_from_db()
+    assert payment.info_data.get("pending_transaction_id") is None
+    assert payment.info_data.get("other") == "keep"
+
+
+@pytest.mark.django_db
+def test_execute_payment_uses_persisted_transaction_without_session(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: transaction_factory(id=tid, state=TransactionState.COMPLETED),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps({"pending_transaction_id": 123456}),
+    )
+    prov.execute_payment(req, payment)
+
+    order.refresh_from_db()
+    payment.refresh_from_db()
+    assert order.status == Order.STATUS_PAID
+    assert payment.info_data.get("transaction_id") == 123456
+    assert payment.info_data.get("pending_transaction_id") is None
 
 
 @pytest.mark.django_db

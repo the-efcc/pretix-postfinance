@@ -62,6 +62,8 @@ ERROR_STATUS_MESSAGES = {
     503: _("PostFinance service unavailable. Please try again later."),
 }
 
+PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
+
 
 class PostFinancePaymentProvider(BasePaymentProvider):
     """
@@ -459,12 +461,74 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def payment_is_valid_session(self, request: HttpRequest) -> bool:
         """
-        Check if the user session contains valid payment information.
+        Check if the request contains valid payment information.
 
-        For PostFinance, we need a transaction ID in the session that was
-        created during checkout_prepare.
+        Existing-order payment flows round-trip through a third-party site and can
+        lose the browser session if the callback host changes. In that case, fall
+        back to the transaction ID we persisted on the OrderPayment during
+        payment_prepare.
         """
-        return request.session.get("payment_postfinance_transaction_id") is not None
+        return self._get_prepared_transaction_id(request) is not None
+
+    def _get_request_payment(self, request: HttpRequest) -> OrderPayment | None:
+        resolver_match = getattr(request, "resolver_match", None)
+        kwargs = getattr(resolver_match, "kwargs", None) or {}
+        payment_id = kwargs.get("payment")
+
+        if payment_id is None:
+            return None
+
+        return OrderPayment.objects.filter(
+            pk=payment_id,
+            provider=self.identifier,
+            order__event=self.event,
+        ).only("info").first()
+
+    def _get_payment_transaction_id(self, payment: OrderPayment | None) -> int | None:
+        if payment is None:
+            return None
+
+        raw_value = (
+            payment.info_data.get(PENDING_TRANSACTION_ID_KEY)
+            or payment.info_data.get("transaction_id")
+        )
+        if raw_value is None:
+            return None
+
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid PostFinance transaction ID %r stored on payment %s",
+                raw_value,
+                payment.pk,
+            )
+            return None
+
+    def _get_prepared_transaction_id(
+        self,
+        request: HttpRequest,
+        payment: OrderPayment | None = None,
+    ) -> int | None:
+        session_transaction_id = request.session.get("payment_postfinance_transaction_id")
+        if session_transaction_id is not None:
+            return int(session_transaction_id)
+
+        return self._get_payment_transaction_id(payment or self._get_request_payment(request))
+
+    def _set_pending_transaction_id(self, payment: OrderPayment, transaction_id: int) -> None:
+        info = payment.info_data
+        info[PENDING_TRANSACTION_ID_KEY] = transaction_id
+        payment.info_data = info
+        payment.save(update_fields=["info"])
+
+    def _clear_pending_transaction_id(self, payment: OrderPayment) -> None:
+        info = payment.info_data
+        if info.pop(PENDING_TRANSACTION_ID_KEY, None) is None:
+            return
+
+        payment.info_data = info
+        payment.save(update_fields=["info"])
 
     def _build_line_items(self, cart: dict[str, Any], currency: str) -> list[LineItemCreate]:
         """
@@ -626,6 +690,110 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             return False
 
+    def payment_prepare(self, request: HttpRequest, payment: OrderPayment) -> bool | str:
+        """
+        Prepare a payment retry or payment method update for an existing order.
+
+        Creates a PostFinance transaction for the existing payment object and
+        returns the hosted payment page URL.
+        """
+        request.session.pop("payment_postfinance_transaction_id", None)
+        self._clear_pending_transaction_id(payment)
+
+        try:
+            client = self._get_client()
+
+            line_items = [
+                LineItemCreate(
+                    name=str(_("Payment for order {code}")).format(code=payment.order.code),
+                    quantity=1,
+                    amountIncludingTax=float(payment.amount),
+                    type=LineItemType.PRODUCT,
+                    uniqueId=f"payment-{payment.pk}",
+                )
+            ]
+
+            success_url = build_absolute_uri(
+                self.event,
+                "presale:event.order.pay.complete",
+                kwargs={
+                    "order": payment.order.code,
+                    "secret": payment.order.secret,
+                    "payment": payment.pk,
+                },
+            )
+            failed_url = build_absolute_uri(
+                self.event,
+                "presale:event.order.pay",
+                kwargs={
+                    "order": payment.order.code,
+                    "secret": payment.order.secret,
+                    "payment": payment.pk,
+                },
+            )
+
+            transaction = client.create_transaction(
+                currency=payment.order.event.currency,
+                line_items=line_items,
+                success_url=success_url,
+                failed_url=failed_url,
+                merchant_reference=f"{payment.order.code}-payment-{payment.pk}",
+                allowed_payment_method_configurations=self._parse_allowed_payment_methods(),
+                customer_email_address=payment.order.email,
+            )
+
+            transaction_id = transaction.id
+            if not transaction_id:
+                logger.error("PostFinance transaction missing ID for payment %s", payment.pk)
+                messages.error(
+                    request,
+                    str(_("Failed to create payment. Please try again.")),
+                )
+                return False
+
+            request.session["payment_postfinance_transaction_id"] = transaction_id
+            self._set_pending_transaction_id(payment, transaction_id)
+            logger.info(
+                "Created PostFinance transaction %s for payment %s",
+                transaction_id,
+                payment.pk,
+            )
+
+            payment_page_url = client.get_payment_page_url(transaction_id)
+            if not payment_page_url:
+                logger.error(
+                    "Failed to get payment page URL for transaction %s",
+                    transaction_id,
+                )
+                request.session.pop("payment_postfinance_transaction_id", None)
+                self._clear_pending_transaction_id(payment)
+                messages.error(
+                    request,
+                    str(_("Failed to redirect to payment page. Please try again.")),
+                )
+                return False
+
+            return payment_page_url
+
+        except PostFinanceError as e:
+            logger.exception("PostFinance API error during payment_prepare: %s", e)
+            request.session.pop("payment_postfinance_transaction_id", None)
+            self._clear_pending_transaction_id(payment)
+            messages.error(
+                request,
+                str(_("Payment service error. Please try again later.")),
+            )
+            return False
+        except Exception as e:
+            logger.exception("Unexpected error during payment_prepare: %s", e)
+            request.session.pop("payment_postfinance_transaction_id", None)
+            self._clear_pending_transaction_id(payment)
+            messages.error(
+                request,
+                str(_("An unexpected error occurred. Please try again.")),
+            )
+            return False
+
     def checkout_confirm_render(
         self, request: HttpRequest, order: Order | None = None, info_data: dict | None = None
     ) -> str:
@@ -651,14 +819,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Retrieves the transaction details from PostFinance, checks the
         transaction state, and confirms or fails the payment accordingly.
         """
-        transaction_id = request.session.get("payment_postfinance_transaction_id")
+        transaction_id = self._get_prepared_transaction_id(request, payment)
 
         if not transaction_id:
             logger.warning(
-                "No PostFinance transaction ID in session for payment %s",
+                "No PostFinance transaction ID available for payment %s",
                 payment.pk,
             )
-            payment.info_data = {"error": "No transaction ID in session"}
+            payment.info_data = {"error": "No transaction ID available"}
             payment.save(update_fields=["info"])
             return None
 
