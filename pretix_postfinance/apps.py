@@ -7,7 +7,7 @@ from . import __version__
 try:
     from pretix.base.plugins import PluginConfig
 except ImportError:
-    raise RuntimeError("Please use pretix 2.7 or above to run this plugin!") from None
+    raise RuntimeError("Please use pretix 2026.3 or above to run this plugin!") from None
 
 
 class PluginApp(PluginConfig):
@@ -23,7 +23,7 @@ class PluginApp(PluginConfig):
         picture = "pretix_postfinance/pf_logo.svg"
         version = __version__
         category = "PAYMENT"
-        compatibility = "pretix>=2.7.0"
+        compatibility = "pretix>=2026.3.0"
         settings_links = (
             (
                 (_("Payment"), _("PostFinance")),
