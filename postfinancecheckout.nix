@@ -30,7 +30,7 @@ buildPythonPackage rec {
     hash = "sha256-xGN8px84BbcD5hILjO20+kqHLWhbDDJairBJL7JcGKM=";
   };
 
-  disabled = pythonOlder "3.9";
+  disabled = pythonOlder "3.11";
 
   build-system = [
     setuptools
