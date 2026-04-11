@@ -16,7 +16,10 @@ from pretix_postfinance.api import PostFinanceError
 @pytest.fixture
 def webhook_env(event, order, organizer):
     user, _ = User.objects.get_or_create(email="admin@localhost", defaults={"password": "admin"})
-    team, _ = Team.objects.get_or_create(organizer=organizer, defaults={"can_change_orders": True})
+    team, _ = Team.objects.get_or_create(
+        organizer=organizer,
+        defaults={"limit_event_permissions": {"event.orders:write": True}},
+    )
     team.members.add(user)
     return event, order
 

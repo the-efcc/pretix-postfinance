@@ -17,6 +17,7 @@ from django.views import View
 from django.views.decorators.csrf import csrf_exempt
 from django_scopes import scopes_disabled
 from pretix.base.models import Event, OrderPayment, OrderRefund
+from pretix.base.permissions import AnyPermissionOf
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.helpers.urls import build_absolute_uri
 
@@ -426,7 +427,7 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
 class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
     """AJAX endpoint for testing PostFinance API connection."""
 
-    permission = "can_change_event_settings"
+    permission = AnyPermissionOf("event.settings.payment:write", "event.settings.general:write")
 
     def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         providers = request.event.get_payment_providers()
@@ -447,7 +448,7 @@ class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
 class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
     """AJAX endpoint for setting up PostFinance webhooks automatically."""
 
-    permission = "can_change_event_settings"
+    permission = AnyPermissionOf("event.settings.payment:write", "event.settings.general:write")
 
     def post(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
         providers = request.event.get_payment_providers()

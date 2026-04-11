@@ -13,9 +13,9 @@ def authenticated_client(client, event):
     user = User.objects.create_user("dummy@dummy.dummy", "dummy")
     team = Team.objects.create(
         organizer=event.organizer,
-        can_view_orders=True,
-        can_change_orders=True,
-        can_change_event_settings=True,
+        limit_event_permissions={
+            "event.settings.payment:write": True,
+        },
     )
     team.members.add(user)
     team.limit_events.add(event)
