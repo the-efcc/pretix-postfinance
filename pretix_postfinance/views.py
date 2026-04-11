@@ -153,7 +153,7 @@ def _get_client_ip(request: HttpRequest) -> str:
         # Take the first IP in the chain (original client)
         return x_forwarded_for.split(",")[0].strip()
     remote_addr = request.META.get("REMOTE_ADDR")
-    return remote_addr if remote_addr else "unknown"
+    return str(remote_addr) if remote_addr else "unknown"
 
 
 def _get_client_from_event(event: Any) -> PostFinanceClient | None:

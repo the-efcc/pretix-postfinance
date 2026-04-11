@@ -216,6 +216,7 @@ class PostFinanceClient:
         merchant_reference: str | None = None,
         language: str | None = None,
         allowed_payment_method_configurations: list[int] | None = None,
+        customer_email_address: str | None = None,
     ) -> Transaction:
         """
         Create a new payment transaction.
@@ -230,6 +231,7 @@ class PostFinanceClient:
             allowed_payment_method_configurations: Optional list of payment method
                 configuration IDs to restrict which payment methods are available.
                 If not provided, all configured payment methods are available.
+            customer_email_address: Optional customer email to prefill on the payment page.
 
         Returns:
             The created Transaction object.
@@ -245,6 +247,7 @@ class PostFinanceClient:
             merchantReference=merchant_reference,
             language=language,
             allowedPaymentMethodConfigurations=allowed_payment_method_configurations,
+            customerEmailAddress=customer_email_address,
         )
 
         try:
