@@ -55,7 +55,7 @@ direnv allow
 uv run ruff check .
 
 # Run type checking
-uv run mypy pretix_postfinance/
+uv run ty check pretix_postfinance/
 
 # Run tests with coverage
 uv run pytest tests/ --cov=pretix_postfinance --cov-report=term-missing -v

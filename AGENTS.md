@@ -35,7 +35,7 @@ PostFinance Checkout payment plugin for pretix.
 devenv shell -- uv run ruff check --fix
 
 # Type check
-devenv shell -- uv run mypy pretix_postfinance/
+devenv shell -- uv run ty check pretix_postfinance/
 
 # Test
 devenv shell -- uv run pytest tests/ -q -W ignore --cov=pretix_postfinance --cov-report=term-missing
@@ -43,7 +43,7 @@ devenv shell -- uv run pytest tests/ -q -W ignore --cov=pretix_postfinance --cov
 
 ## Important Conventions
 
-2. **Type Hints**: Strict mypy with django-stubs, use `PretixHttpRequest` for views
+2. **Type Hints**: use `PretixHttpRequest` for views
 3. **Payment Info Storage**: Use `payment.info_data` dict for transaction/refund metadata
 4. **Error Handling**: Store `error_code` and `error_status_code` in info_data
 5. **Import Sorting**: stdlib -> third-party -> local (enforced by ruff)
