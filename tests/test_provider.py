@@ -36,9 +36,12 @@ def test_execute_payment_transaction_states(
 
     prov = PostFinancePaymentProvider(event)
     req = rf.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": payment.pk,
+    }
     prov.execute_payment(req, payment)
 
     order.refresh_from_db()
@@ -60,9 +63,12 @@ def test_execute_payment_api_error(env, rf, monkeypatch):
 
     prov = PostFinancePaymentProvider(event)
     req = rf.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": payment.pk,
+    }
 
     with pytest.raises(PaymentException):
         prov.execute_payment(req, payment)
@@ -72,19 +78,116 @@ def test_execute_payment_api_error(env, rf, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_execute_payment_no_transaction_id(env, rf):
+def test_execute_payment_no_transaction_id_creates_transaction(
+    env, rf, monkeypatch, transaction_factory
+):
     event, order = env
 
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: transaction_factory(id=999888),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
     prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
+    req = rf.get("/")
     req.session = {}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
     result = prov.execute_payment(req, payment)
 
-    assert result is None
+    assert result == "https://checkout.postfinance.ch/pay/999888"
     payment.refresh_from_db()
-    assert payment.info_data.get("error") == "No transaction ID available"
+    assert payment.info_data.get("pending_transaction_id") == 999888
+
+
+@pytest.mark.django_db
+def test_execute_payment_ignores_unrelated_session_transaction(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        lambda self, **kwargs: transaction_factory(id=999888),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+
+    stale_payment = order.payments.create(provider="postfinance", amount=order.total)
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": stale_payment.pk,
+    }
+
+    result = prov.execute_payment(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    payment.refresh_from_db()
+    assert payment.info_data.get("pending_transaction_id") == 999888
+
+
+@pytest.mark.django_db
+def test_execute_payment_uses_order_line_items_for_new_checkout(
+    env, rf, monkeypatch, transaction_factory
+):
+    event, order = env
+
+    captured_kwargs = {}
+    captured_cart = {}
+    expected_line_items = [object()]
+
+    def capture_create_transaction(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return transaction_factory(id=999888)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        capture_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+
+    def capture_line_items(cart, currency):
+        captured_cart.update(
+            {
+                "positions": list(cart["positions"]),
+                "fees": list(cart["fees"]),
+                "total": cart["total"],
+                "currency": currency,
+            }
+        )
+        return expected_line_items
+
+    monkeypatch.setattr(prov, "_build_line_items", capture_line_items)
+
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    result = prov.execute_payment(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    assert captured_kwargs["line_items"] is expected_line_items
+    assert captured_cart == {
+        "positions": [],
+        "fees": [],
+        "total": order.total,
+        "currency": event.currency,
+    }
 
 
 @pytest.mark.django_db
@@ -309,9 +412,9 @@ def test_payment_refund_supported(env, state, expected):
     "session,expected",
     [
         ({"payment_postfinance_transaction_id": 123456}, True),
-        ({}, False),
+        ({}, True),
     ],
-    ids=["with_transaction_id", "without_transaction_id"],
+    ids=["with_transaction_id", "without_transaction_id_yet"],
 )
 def test_payment_is_valid_session(env, rf, session, expected):
     event, _ = env
@@ -357,13 +460,15 @@ def test_payment_prepare_persists_transaction_on_payment(
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
+    req = rf.post("/", {"payment": "postfinance"})
     req.session = {}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
     result = prov.payment_prepare(req, payment)
 
     assert result == "https://checkout.postfinance.ch/pay/999888"
+    assert req.session.get("payment_postfinance_transaction_id") == 999888
+    assert req.session.get("payment_postfinance_transaction_payment_id") == payment.pk
     payment.refresh_from_db()
     assert payment.info_data.get("pending_transaction_id") == 999888
 
@@ -384,7 +489,7 @@ def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
+    req = rf.post("/", {"payment": "postfinance"})
     req.session = {}
 
     payment = order.payments.create(
@@ -395,6 +500,8 @@ def test_payment_prepare_cleans_stale_payment_transaction_on_failure(
     result = prov.payment_prepare(req, payment)
 
     assert result is False
+    assert "payment_postfinance_transaction_id" not in req.session
+    assert "payment_postfinance_transaction_payment_id" not in req.session
     payment.refresh_from_db()
     assert payment.info_data.get("pending_transaction_id") is None
     assert payment.info_data.get("other") == "keep"
@@ -608,9 +715,12 @@ def test_execute_payment_cleans_session(
 
     prov = PostFinancePaymentProvider(event)
     req = rf.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
 
     payment = order.payments.create(provider="postfinance", amount=order.total)
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": payment.pk,
+    }
 
     if exception:
         with pytest.raises(PaymentException):
@@ -619,192 +729,34 @@ def test_execute_payment_cleans_session(
         prov.execute_payment(req, payment)
 
     assert "payment_postfinance_transaction_id" not in req.session
+    assert "payment_postfinance_transaction_payment_id" not in req.session
 
 
 @pytest.mark.django_db
-def test_checkout_prepare_clears_stale_session(env, rf, monkeypatch, transaction_factory):
-    event, order = env
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: transaction_factory(id=999888),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    result = prov.checkout_prepare(req, cart)
-
-    assert result == "https://checkout.postfinance.ch/pay/999888"
-    assert req.session.get("payment_postfinance_transaction_id") == 999888
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_cleans_session_on_payment_url_failure(
-    env, rf, monkeypatch, transaction_factory
+def test_checkout_prepare_clears_stale_session_without_creating_transaction(
+    env, rf, monkeypatch
 ):
     event, order = env
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: transaction_factory(id=999888),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: None,
+        lambda self, **kwargs: pytest.fail("checkout_prepare should not create a transaction"),
     )
 
     prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {}
+    req = rf.post("/", {"payment": "postfinance"})
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": 999,
+    }
     req.event = event
-    req._messages = []
 
     cart = {"total": order.total, "positions": [], "fees": []}
     result = prov.checkout_prepare(req, cart)
 
-    assert result is False
+    assert result is True
     assert "payment_postfinance_transaction_id" not in req.session
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_cleans_session_on_api_error(env, rf, monkeypatch):
-    event, order = env
-
-    def raise_api_error(**kwargs):
-        raise PostFinanceError("API Error", status_code=500)
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: raise_api_error(**kwargs),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {"payment_postfinance_transaction_id": 123456}
-    req.event = event
-    req._messages = []
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    result = prov.checkout_prepare(req, cart)
-
-    assert result is False
-    assert "payment_postfinance_transaction_id" not in req.session
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_success(env, rf, monkeypatch, transaction_factory):
-    event, order = env
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: transaction_factory(id=999888),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    result = prov.checkout_prepare(req, cart)
-
-    assert result == "https://checkout.postfinance.ch/pay/999888"
-    assert req.session.get("payment_postfinance_transaction_id") == 999888
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_passes_line_items(env, rf, monkeypatch, transaction_factory):
-    event, order = env
-
-    captured_kwargs = {}
-
-    def capture_create_transaction(**kwargs):
-        captured_kwargs.update(kwargs)
-        return transaction_factory(id=999888)
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: capture_create_transaction(**kwargs),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    prov.checkout_prepare(req, cart)
-
-    assert "line_items" in captured_kwargs
-    assert len(captured_kwargs["line_items"]) == 1
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_passes_allowed_payment_methods(env, rf, monkeypatch, transaction_factory):
-    event, order = env
-
-    captured_kwargs = {}
-
-    def capture_create_transaction(**kwargs):
-        captured_kwargs.update(kwargs)
-        return transaction_factory(id=999888)
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: capture_create_transaction(**kwargs),
-    )
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
-        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    monkeypatch.setattr(prov, "_parse_allowed_payment_methods", lambda: [101, 102])
-
-    req = rf.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    prov.checkout_prepare(req, cart)
-
-    assert captured_kwargs["allowed_payment_method_configurations"] == [101, 102]
-
-
-@pytest.mark.django_db
-def test_checkout_prepare_transaction_missing_id(env, rf, monkeypatch, transaction_factory):
-    event, order = env
-
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
-        lambda self, **kwargs: transaction_factory(id=None),
-    )
-
-    prov = PostFinancePaymentProvider(event)
-    req = rf.post("/")
-    req.session = {}
-    req.event = event
-
-    cart = {"total": order.total, "positions": [], "fees": []}
-    result = prov.checkout_prepare(req, cart)
-
-    assert result is False
+    assert "payment_postfinance_transaction_payment_id" not in req.session
 
 
 @pytest.mark.django_db
