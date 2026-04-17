@@ -75,9 +75,6 @@ Configure the plugin in your pretix settings with:
 - Payment processing via PostFinance Checkout
 - Full and partial refund support
 - Webhook handling for payment and refund notifications
-- Payment capture support
-- Comprehensive error handling and logging
-- Admin interface integration
 
 ## License
 

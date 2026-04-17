@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
 import logging
 from collections import OrderedDict
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from django import forms
 from django.contrib import messages
@@ -1062,19 +1061,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
 
             # Store refund info on the OrderRefund object
-            refund.info = json.dumps(
-                {
-                    "refund_id": postfinance_refund.id,
-                    "state": postfinance_refund.state.value if postfinance_refund.state else None,
-                    "amount": float(postfinance_refund.amount)
-                    if postfinance_refund.amount
-                    else None,
-                    "created_on": str(postfinance_refund.created_on)
-                    if postfinance_refund.created_on
-                    else None,
-                }
-            )
-            refund.state = OrderRefund.REFUND_STATE_TRANSIT
+            refund.info_data = {
+                "refund_id": postfinance_refund.id,
+                "state": postfinance_refund.state.value if postfinance_refund.state else None,
+                "amount": float(postfinance_refund.amount) if postfinance_refund.amount else None,
+                "created_on": str(postfinance_refund.created_on)
+                if postfinance_refund.created_on
+                else None,
+            }
+            cast(Any, refund).state = OrderRefund.REFUND_STATE_TRANSIT
             refund.save(update_fields=["info", "state"])
 
             logger.info(
@@ -1111,7 +1106,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "error_status_code": e.status_code,
                 }
             )
-            refund.info = json.dumps(refund_info_data)
+            refund.info_data = refund_info_data
             refund.save(update_fields=["info"])
 
             # Audit log for failed refund
