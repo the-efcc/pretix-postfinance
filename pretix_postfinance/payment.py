@@ -323,15 +323,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if not cleaned_data.get("auth_key"):
                 missing.append(str(_("Authentication key")))
 
-            test_missing: list = []
-            if not cleaned_data.get("test_space_id"):
-                missing.append(str(_("Test Space ID")))
-            if not cleaned_data.get("test_user_id"):
-                missing.append(str(_("Test User ID")))
-            if not cleaned_data.get("test_auth_key"):
-                missing.append(str(_("Test Authentication key")))
+            if cleaned_data.get("test_space_id"):
+                if not cleaned_data.get("test_user_id"):
+                    missing.append(str(_("Test User ID")))
+                if not cleaned_data.get("test_auth_key"):
+                    missing.append(str(_("Test Authentication key")))
 
-            if missing and test_missing:
+            if missing:
                 msg = _(
                     "The following fields are required to enable "
                     "this payment provider: {fields}"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from django.core.exceptions import ValidationError
 
 from pretix_postfinance.payment import PostFinancePaymentProvider
 
@@ -194,3 +195,43 @@ def test_all_settings_form_fields_are_accessible(event, monkeypatch):
             assert retrieved == test_value, (
                 f"Field '{field_name}' was set to '{test_value}' but retrieved as '{retrieved}'"
             )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("cleaned_data", "expected_fields"),
+    [
+        (
+            {
+                "_enabled": True,
+                "space_id": "",
+                "user_id": "67890",
+                "auth_key": "test-secret",
+            },
+            ["Space ID"],
+        ),
+        (
+            {
+                "_enabled": True,
+                "space_id": "12345",
+                "user_id": "67890",
+                "auth_key": "test-secret",
+                "test_space_id": "99999",
+                "test_user_id": "",
+                "test_auth_key": "",
+            },
+            ["Test User ID", "Test Authentication key"],
+        ),
+    ],
+)
+def test_settings_form_clean_validates_required_credentials(
+    event, cleaned_data, expected_fields
+):
+    provider = PostFinancePaymentProvider(event)
+
+    with pytest.raises(ValidationError) as excinfo:
+        provider.settings_form_clean(cleaned_data)
+
+    message = str(excinfo.value)
+    for expected_field in expected_fields:
+        assert expected_field in message
