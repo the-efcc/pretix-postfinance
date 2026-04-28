@@ -1,85 +1,81 @@
 "use strict";
 
 $(function () {
-  // Test Connection button
-  var testBtn = document.getElementById("postfinance-test-connection");
-  if (testBtn) {
-    var testResult = document.getElementById("postfinance-test-result");
-    var testUrl = testBtn.getAttribute("data-test-url");
+  document.querySelectorAll(".postfinance-action-group").forEach(function (group) {
+    var targetId = group.getAttribute("data-move-after");
+    if (!targetId) return;
+    var target = document.getElementById(targetId);
+    if (!target) return;
+    var formGroup = target.closest(".form-group");
+    if (!formGroup) return;
+    formGroup.parentNode.insertBefore(group, formGroup.nextSibling);
+  });
 
-    testBtn.addEventListener("click", function () {
-      testBtn.disabled = true;
-      testBtn.textContent = gettext("Testing...");
-      testResult.textContent = "";
-
-      var csrfToken = document.querySelector("input[name=csrfmiddlewaretoken]");
-      fetch(testUrl, {
-        method: "POST",
-        headers: {
-          "X-CSRFToken": csrfToken ? csrfToken.value : "",
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-      })
-        .then(function (response) {
-          return response.json();
-        })
-        .then(function (data) {
-          testBtn.disabled = false;
-          testBtn.textContent = gettext("Test Connection");
-          testResult.textContent = data.message;
-          testResult.style.color = data.success ? "green" : "red";
-        })
-        .catch(function (error) {
-          testBtn.disabled = false;
-          testBtn.textContent = gettext("Test Connection");
-          testResult.textContent = gettext(
-            "Connection test failed. Please try again.",
-          );
-          testResult.style.color = "red";
-          console.error("PostFinance test connection error:", error);
-        });
-    });
+  function getCsrfToken() {
+    var input = document.querySelector("input[name=csrfmiddlewaretoken]");
+    return input ? input.value : "";
   }
 
-  // Setup Webhooks button
-  var setupBtn = document.getElementById("postfinance-setup-webhooks");
-  if (setupBtn) {
-    var setupResult = document.getElementById("postfinance-setup-result");
-    var setupUrl = setupBtn.getAttribute("data-setup-url");
-
-    setupBtn.addEventListener("click", function () {
-      setupBtn.disabled = true;
-      setupBtn.textContent = gettext("Setting up...");
-      setupResult.textContent = "";
-
-      var csrfToken = document.querySelector("input[name=csrfmiddlewaretoken]");
-      fetch(setupUrl, {
-        method: "POST",
-        headers: {
-          "X-CSRFToken": csrfToken ? csrfToken.value : "",
-          "Content-Type": "application/json",
-        },
-        credentials: "same-origin",
-      })
-        .then(function (response) {
-          return response.json();
-        })
-        .then(function (data) {
-          setupBtn.disabled = false;
-          setupBtn.textContent = gettext("Setup Webhooks Automatically");
-          setupResult.textContent = data.message;
-          setupResult.style.color = data.success ? "green" : "red";
-        })
-        .catch(function (error) {
-          setupBtn.disabled = false;
-          setupBtn.textContent = gettext("Setup Webhooks Automatically");
-          setupResult.textContent = gettext(
-            "Webhook setup failed. Please try again.",
-          );
-          setupResult.style.color = "red";
-          console.error("PostFinance setup webhooks error:", error);
-        });
-    });
+  function findResultEl(btn) {
+    var formGroup = btn.closest(".form-group");
+    return formGroup ? formGroup.querySelector(".postfinance-action-result") : null;
   }
+
+  function postAction(btn, url, options) {
+    var resultEl = findResultEl(btn);
+    var originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = options.busyLabel;
+    if (resultEl) {
+      resultEl.textContent = "";
+    }
+
+    var formData = new FormData();
+    formData.append("mode", btn.getAttribute("data-mode") || "live");
+
+    fetch(url, {
+      method: "POST",
+      headers: { "X-CSRFToken": getCsrfToken() },
+      credentials: "same-origin",
+      body: formData,
+    })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        if (resultEl) {
+          resultEl.textContent = " " + data.message;
+          resultEl.style.color = data.success ? "green" : "red";
+        }
+      })
+      .catch(function (error) {
+        btn.disabled = false;
+        btn.textContent = originalLabel;
+        if (resultEl) {
+          resultEl.textContent = " " + options.failureMessage;
+          resultEl.style.color = "red";
+        }
+        console.error("PostFinance " + options.busyLabel + " error:", error);
+      });
+  }
+
+  document.querySelectorAll(".postfinance-test-connection").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      postAction(btn, btn.getAttribute("data-test-url"), {
+        busyLabel: gettext("Testing..."),
+        failureMessage: gettext("Connection test failed. Please try again."),
+      });
+    });
+  });
+
+  document.querySelectorAll(".postfinance-setup-webhooks").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      postAction(btn, btn.getAttribute("data-setup-url"), {
+        busyLabel: gettext("Setting up..."),
+        failureMessage: gettext("Webhook setup failed. Please try again."),
+      });
+    });
+  });
 });

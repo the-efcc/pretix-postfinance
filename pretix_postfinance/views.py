@@ -25,6 +25,13 @@ from ._types import PretixHttpRequest
 from .api import PostFinanceClient, PostFinanceError
 from .payment import FAILURE_STATES, SUCCESS_STATES
 
+
+def _validate_mode(raw: str | None) -> str | None:
+    """Return the mode if valid ('live' or 'test'), else None."""
+    if raw in ("live", "test"):
+        return raw
+    return None
+
 logger = logging.getLogger(__name__)
 
 WEBHOOK_STATUS_NOT_FOUND = "not_found"
@@ -441,7 +448,8 @@ class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
                 }
             )
 
-        success, message = provider.test_connection()
+        mode = _validate_mode(request.POST.get("mode"))
+        success, message = provider.test_connection(mode=mode)
         return JsonResponse({"success": success, "message": message})
 
 
@@ -462,67 +470,7 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
                 }
             )
 
-        space_id = provider.settings.get("space_id")
-        user_id = provider.settings.get("user_id")
-        auth_key = provider.settings.get("auth_key")
-
-        if not all([space_id, user_id, auth_key]):
-            return JsonResponse(
-                {
-                    "success": False,
-                    "message": str(
-                        _(
-                            "Please configure Space ID, User ID, and Authentication Key before "
-                            "setting up webhooks."
-                        )
-                    ),
-                }
-            )
+        mode = _validate_mode(request.POST.get("mode")) or "live"
         webhook_url = build_absolute_uri("plugins:pretix_postfinance:postfinance.webhook")
-
-        try:
-            client = PostFinanceClient(
-                space_id=int(space_id),
-                user_id=int(user_id),
-                api_secret=str(auth_key),
-            )
-            result = client.setup_webhooks(webhook_url)
-
-            created_transaction = result.get("created_transaction_listener", False)
-            created_refund = result.get("created_refund_listener", False)
-
-            if created_transaction and created_refund:
-                message = _(
-                    "Webhooks configured successfully! "
-                    "Transaction and refund updates will be received automatically."
-                )
-            elif created_transaction:
-                message = _(
-                    "Transaction webhook configured. "
-                    "Refund webhook was already set up."
-                )
-            elif created_refund:
-                message = _(
-                    "Refund webhook configured. "
-                    "Transaction webhook was already set up."
-                )
-            else:
-                message = _(
-                    "Webhooks are already configured. "
-                    "No changes were needed."
-                )
-
-            return JsonResponse(
-                {
-                    "success": True,
-                    "message": str(message),
-                    "details": result,
-                }
-            )
-        except PostFinanceError as e:
-            return JsonResponse(
-                {
-                    "success": False,
-                    "message": str(_("Failed to setup webhooks: {error}").format(error=str(e))),
-                }
-            )
+        success, message = provider.setup_webhooks(webhook_url, mode=mode)
+        return JsonResponse({"success": success, "message": message})

@@ -7,44 +7,58 @@
     <code>{{ url }}</code>
     {% endblocktrans %}
     <br /><br />
-    {% blocktrans trimmed %} You can set this up automatically using the button
-    below, or configure it manually in your PostFinance Checkout dashboard.
+    {% blocktrans trimmed %} You can set this up automatically using the buttons
+    next to your authentication keys above, or configure it manually in your
+    PostFinance Checkout dashboard.
     {% endblocktrans %}
 </div>
 
-<div class="form-group">
-    <label class="col-md-3 control-label">{% trans "Connection Test" %}</label>
-    <div class="col-md-9">
+<div
+    class="postfinance-action-group form-group"
+    data-move-after="id_payment_postfinance_auth_key"
+>
+    <div class="col-md-9 col-md-offset-3">
         <button
             type="button"
-            class="btn btn-default"
-            id="postfinance-test-connection"
+            class="btn btn-default postfinance-test-connection"
             data-test-url="{{ test_url }}"
+            data-mode="live"
         >
             {% trans "Test Connection" %}
         </button>
-        <span id="postfinance-test-result"></span>
+        <button
+            type="button"
+            class="btn btn-default postfinance-setup-webhooks"
+            data-setup-url="{{ setup_webhooks_url }}"
+            data-mode="live"
+        >
+            {% trans "Setup Webhooks" %}
+        </button>
+        <span class="postfinance-action-result"></span>
     </div>
 </div>
 
-<div class="form-group">
-    <label class="col-md-3 control-label">{% trans "Webhook Setup" %}</label>
-    <div class="col-md-9">
+<div
+    class="postfinance-action-group form-group"
+    data-move-after="id_payment_postfinance_test_auth_key"
+>
+    <div class="col-md-9 col-md-offset-3">
         <button
             type="button"
-            class="btn btn-default"
-            id="postfinance-setup-webhooks"
-            data-setup-url="{{ setup_webhooks_url }}"
+            class="btn btn-default postfinance-test-connection"
+            data-test-url="{{ test_url }}"
+            data-mode="test"
         >
-            {% trans "Setup Webhooks Automatically" %}
+            {% trans "Test Connection" %}
         </button>
-        <span id="postfinance-setup-result"></span>
-        <p class="help-block">
-            {% blocktrans trimmed %}
-            This will create the necessary webhook URL
-            and listeners in your PostFinance Checkout space. If they already
-            exist, they will be reused.
-            {% endblocktrans %}
-        </p>
+        <button
+            type="button"
+            class="btn btn-default postfinance-setup-webhooks"
+            data-setup-url="{{ setup_webhooks_url }}"
+            data-mode="test"
+        >
+            {% trans "Setup Webhooks" %}
+        </button>
+        <span class="postfinance-action-result"></span>
     </div>
 </div>

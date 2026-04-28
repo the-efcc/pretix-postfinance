@@ -987,3 +987,87 @@ def test_test_connection_indicates_live_mode(env, monkeypatch, space_factory):
     assert success is True
     assert "live" in message.lower()
     assert "Test Space" in message
+
+
+@pytest.mark.django_db
+def test_test_connection_explicit_mode_targets_correct_space(env, monkeypatch):
+    event, _ = env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret-test")
+
+    captured = {}
+
+    def mock_init(self, space_id, user_id, api_secret):
+        captured["space_id"] = space_id
+        captured["user_id"] = user_id
+        captured["api_secret"] = api_secret
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.__init__", mock_init
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_space",
+        lambda self: type("S", (), {"name": "X"})(),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    prov.test_connection(mode="test")
+    assert captured["space_id"] == 99999
+
+    captured.clear()
+    prov.test_connection(mode="live")
+    assert captured["space_id"] == 12345
+
+
+@pytest.mark.django_db
+def test_test_connection_test_mode_missing_credentials(env):
+    event, _ = env
+    prov = PostFinancePaymentProvider(event)
+    success, message = prov.test_connection(mode="test")
+
+    assert success is False
+    assert "test" in message.lower()
+
+
+@pytest.mark.django_db
+def test_setup_webhooks_targets_correct_space(env, monkeypatch):
+    event, _ = env
+    event.settings.set("payment_postfinance_test_space_id", "99999")
+    event.settings.set("payment_postfinance_test_user_id", "88888")
+    event.settings.set("payment_postfinance_test_auth_key", "test-secret-test")
+
+    captured = {}
+
+    def mock_init(self, space_id, user_id, api_secret):
+        captured["space_id"] = space_id
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.__init__", mock_init
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.setup_webhooks",
+        lambda self, url: {
+            "created_transaction_listener": True,
+            "created_refund_listener": True,
+        },
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    success, _msg = prov.setup_webhooks("https://example.com/webhook", mode="test")
+    assert success is True
+    assert captured["space_id"] == 99999
+
+    captured.clear()
+    prov.setup_webhooks("https://example.com/webhook", mode="live")
+    assert captured["space_id"] == 12345
+
+
+@pytest.mark.django_db
+def test_setup_webhooks_test_mode_missing_credentials(env):
+    event, _ = env
+    prov = PostFinancePaymentProvider(event)
+    success, message = prov.setup_webhooks("https://example.com/webhook", mode="test")
+
+    assert success is False
+    assert "test" in message.lower()

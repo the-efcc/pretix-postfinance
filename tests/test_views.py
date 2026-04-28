@@ -74,3 +74,73 @@ class TestTestConnectionView:
 
         # Should redirect to login
         assert response.status_code in (302, 403)
+
+    @pytest.mark.django_db
+    def test_connection_passes_mode_to_provider(
+        self, authenticated_client, event, monkeypatch
+    ):
+        client = authenticated_client
+        captured = {}
+
+        def fake_test(self, mode=None):
+            captured["mode"] = mode
+            return True, "ok"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.test_connection",
+            fake_test,
+        )
+
+        url = f"/control/event/{event.organizer.slug}/{event.slug}/postfinance/test-connection/"
+        response = client.post(url, data={"mode": "test"})
+
+        assert response.status_code == 200
+        assert captured["mode"] == "test"
+
+
+class TestSetupWebhooksView:
+    @pytest.mark.django_db
+    def test_setup_webhooks_passes_mode_to_provider(
+        self, authenticated_client, event, monkeypatch
+    ):
+        client = authenticated_client
+        captured = {}
+
+        def fake_setup(self, webhook_url, mode):
+            captured["mode"] = mode
+            captured["webhook_url"] = webhook_url
+            return True, "ok"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.setup_webhooks",
+            fake_setup,
+        )
+
+        url = f"/control/event/{event.organizer.slug}/{event.slug}/postfinance/setup-webhooks/"
+        response = client.post(url, data={"mode": "test"})
+
+        assert response.status_code == 200
+        assert captured["mode"] == "test"
+        assert "webhook" in captured["webhook_url"]
+
+    @pytest.mark.django_db
+    def test_setup_webhooks_defaults_to_live_when_mode_invalid(
+        self, authenticated_client, event, monkeypatch
+    ):
+        client = authenticated_client
+        captured = {}
+
+        def fake_setup(self, webhook_url, mode):
+            captured["mode"] = mode
+            return True, "ok"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.setup_webhooks",
+            fake_setup,
+        )
+
+        url = f"/control/event/{event.organizer.slug}/{event.slug}/postfinance/setup-webhooks/"
+        response = client.post(url, data={"mode": "garbage"})
+
+        assert response.status_code == 200
+        assert captured["mode"] == "live"

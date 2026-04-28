@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from django import forms
 from django.contrib import messages
@@ -111,14 +111,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             and self.settings.get("test_auth_key")
         )
 
-    def _get_credentials(self) -> tuple[str | None, str | None, str | None]:
-        """
-        Get the appropriate credentials based on event test mode.
-
-        Returns test credentials if the event is in test mode and test
-        credentials are configured, otherwise returns live credentials.
-        """
-        if self.event.testmode and self._has_test_credentials():
+    def _get_credentials_for_mode(
+        self, mode: Literal["live", "test"]
+    ) -> tuple[str | None, str | None, str | None]:
+        """Return credentials for an explicit space (live or test)."""
+        if mode == "test":
             return (
                 self.settings.get("test_space_id"),
                 self.settings.get("test_user_id"),
@@ -129,6 +126,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             self.settings.get("user_id"),
             self.settings.get("auth_key"),
         )
+
+    def _get_credentials(self) -> tuple[str | None, str | None, str | None]:
+        """
+        Get the appropriate credentials based on event test mode.
+
+        Returns test credentials if the event is in test mode and test
+        credentials are configured, otherwise returns live credentials.
+        """
+        if self.event.testmode and self._has_test_credentials():
+            return self._get_credentials_for_mode("test")
+        return self._get_credentials_for_mode("live")
 
     @property
     def public_name(self) -> str:
@@ -170,7 +178,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                             name = title
                     choices.append((str(config.id), name))
             return sorted(choices, key=lambda x: x[1])
-        except PostFinanceError:
+        except Exception:
+            # Settings form rendering must never break on bad credentials.
+            # The SDK raises non-PostFinanceError exceptions for malformed
+            # auth keys (e.g. binascii.Error) before any HTTP call.
             logger.warning("Failed to fetch payment method configurations", exc_info=True)
             return []
 
@@ -206,6 +217,29 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         d = OrderedDict(
             list(super().settings_form_fields.items())
             + [
+                (
+                    "public_name",
+                    forms.CharField(
+                        label=_("Display Name"),
+                        help_text=_(
+                            "Custom name shown to customers during checkout. "
+                            "Leave empty to use the default name 'PostFinance'."
+                        ),
+                        required=False,
+                    ),
+                ),
+                (
+                    "description",
+                    forms.CharField(
+                        label=_("Description"),
+                        help_text=_(
+                            "Custom description shown on the checkout page. "
+                            "Leave empty to use the default message."
+                        ),
+                        widget=forms.Textarea(attrs={"rows": 3}),
+                        required=False,
+                    ),
+                ),
                 (
                     "space_id",
                     forms.CharField(
@@ -266,33 +300,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 (
                     "test_auth_key",
                     SecretKeySettingsField(
-                        label=_("Test Authentication key"),
+                        label=_("Test authentication key"),
                         help_text=_(
                             "Authentication key for test mode. Required if Test Space ID is set."
                         ),
-                        required=False,
-                    ),
-                ),
-                (
-                    "public_name",
-                    forms.CharField(
-                        label=_("Display Name"),
-                        help_text=_(
-                            "Custom name shown to customers during checkout. "
-                            "Leave empty to use the default name 'PostFinance'."
-                        ),
-                        required=False,
-                    ),
-                ),
-                (
-                    "description",
-                    forms.CharField(
-                        label=_("Description"),
-                        help_text=_(
-                            "Custom description shown on the checkout page. "
-                            "Leave empty to use the default message."
-                        ),
-                        widget=forms.Textarea(attrs={"rows": 3}),
                         required=False,
                     ),
                 ),
@@ -328,7 +339,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 if not cleaned_data.get("test_user_id"):
                     missing.append(str(_("Test User ID")))
                 if not cleaned_data.get("test_auth_key"):
-                    missing.append(str(_("Test Authentication key")))
+                    missing.append(str(_("Test authentication key")))
 
             if missing:
                 msg = _(
@@ -370,24 +381,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         }
         return template.render(ctx)
 
-    def _get_client(self) -> PostFinanceClient:
-        """
-        Create and return a PostFinance API client using the configured settings.
-
-        Uses test credentials when the event is in test mode and test
-        credentials are configured, otherwise uses live credentials.
-        """
-        space_id, user_id, auth_key = self._get_credentials()
-        using_test = self.event.testmode and self._has_test_credentials()
+    def _get_client_for_mode(self, mode: Literal["live", "test"]) -> PostFinanceClient:
+        """Create a PostFinance API client for an explicit space (live or test)."""
+        space_id, user_id, auth_key = self._get_credentials_for_mode(mode)
 
         logger.debug(
             "Creating PostFinance client for event %s: space_id=%s, user_id=%s, "
-            "auth_key=%s, test_mode=%s",
+            "auth_key=%s, mode=%s",
             self.event.slug,
             space_id,
             user_id,
             "***" if auth_key else "(empty)",
-            using_test,
+            mode,
         )
 
         return PostFinanceClient(
@@ -396,26 +401,42 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             api_secret=str(auth_key) if auth_key else "",
         )
 
-    def test_connection(self) -> tuple[bool, str]:
+    def _get_client(self) -> PostFinanceClient:
         """
-        Test the connection to PostFinance API using configured credentials.
+        Create a client using the credentials picked by `event.testmode`.
 
-        Tests with test credentials if event is in test mode and test
-        credentials are configured, otherwise uses live credentials.
+        Used at runtime during payments — admin actions should call
+        `_get_client_for_mode()` directly with an explicit mode.
+        """
+        mode: Literal["live", "test"] = (
+            "test" if self.event.testmode and self._has_test_credentials() else "live"
+        )
+        return self._get_client_for_mode(mode)
+
+    def test_connection(
+        self, mode: Literal["live", "test"] | None = None
+    ) -> tuple[bool, str]:
+        """
+        Test the connection to PostFinance API for a specific space.
+
+        If `mode` is None, defaults to test credentials when the event is in
+        test mode and test credentials are configured, otherwise live.
 
         Returns:
             A tuple of (success: bool, message: str).
         """
-        space_id, user_id, auth_key = self._get_credentials()
-        using_test = self.event.testmode and self._has_test_credentials()
+        if mode is None:
+            mode = "test" if self.event.testmode and self._has_test_credentials() else "live"
+
+        space_id, user_id, auth_key = self._get_credentials_for_mode(mode)
 
         if not all([space_id, user_id, auth_key]):
-            if using_test:
+            if mode == "test":
                 return (
                     False,
                     str(
                         _(
-                            "Please configure test Space ID, User ID, and Authentication Key "
+                            "Please configure test Space ID, User ID, and authentication Key "
                             "before testing the connection."
                         )
                     ),
@@ -424,17 +445,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 False,
                 str(
                     _(
-                        "Please configure Space ID, User ID, and Authentication Key before "
+                        "Please configure Space ID, User ID, and authentication Key before "
                         "testing the connection."
                     )
                 ),
             )
 
         try:
-            client = self._get_client()
+            client = self._get_client_for_mode(mode)
             space = client.get_space()
             space_name = space.name if space.name else str(_("Unknown"))
-            mode_label = str(_("test")) if using_test else str(_("live"))
+            mode_label = str(_("test")) if mode == "test" else str(_("live"))
             return (
                 True,
                 str(
@@ -457,6 +478,74 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             return (False, str(_("Connection failed: {error}").format(error=str(e))))
         except Exception as e:
             return (False, str(_("Unexpected error: {error}").format(error=str(e))))
+
+    def setup_webhooks(
+        self, webhook_url: str, mode: Literal["live", "test"]
+    ) -> tuple[bool, str]:
+        """
+        Create the PostFinance webhook URL and listeners for a specific space.
+
+        Returns:
+            A tuple of (success: bool, message: str).
+        """
+        space_id, user_id, auth_key = self._get_credentials_for_mode(mode)
+
+        if not all([space_id, user_id, auth_key]):
+            if mode == "test":
+                return (
+                    False,
+                    str(
+                        _(
+                            "Please configure test Space ID, User ID, and authentication Key "
+                            "before setting up webhooks."
+                        )
+                    ),
+                )
+            return (
+                False,
+                str(
+                    _(
+                        "Please configure Space ID, User ID, and authentication Key before "
+                        "setting up webhooks."
+                    )
+                ),
+            )
+
+        try:
+            client = self._get_client_for_mode(mode)
+            result = client.setup_webhooks(webhook_url)
+        except PostFinanceError as e:
+            return (
+                False,
+                str(_("Failed to setup webhooks: {error}").format(error=str(e))),
+            )
+        except Exception as e:
+            logger.warning("Unexpected error setting up webhooks", exc_info=True)
+            return (
+                False,
+                str(_("Failed to setup webhooks: {error}").format(error=str(e))),
+            )
+
+        created_transaction = result.get("created_transaction_listener", False)
+        created_refund = result.get("created_refund_listener", False)
+
+        if created_transaction and created_refund:
+            message = _(
+                "Webhooks configured successfully! "
+                "Transaction and refund updates will be received automatically."
+            )
+        elif created_transaction:
+            message = _(
+                "Transaction webhook configured. Refund webhook was already set up."
+            )
+        elif created_refund:
+            message = _(
+                "Refund webhook configured. Transaction webhook was already set up."
+            )
+        else:
+            message = _("Webhooks are already configured. No changes were needed.")
+
+        return (True, str(message))
 
     def payment_is_valid_session(self, request: HttpRequest) -> bool:
         """
