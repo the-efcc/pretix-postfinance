@@ -192,7 +192,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         Returns:
             List of payment method configuration IDs, or None if all methods allowed.
         """
-        allowed_methods = self.settings.get("allowed_payment_methods")
+        allowed_methods = self.settings.get("allowed_payment_methods", as_type=list)
 
         if not allowed_methods:
             return None
