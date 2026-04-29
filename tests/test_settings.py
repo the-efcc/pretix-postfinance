@@ -220,7 +220,7 @@ def test_all_settings_form_fields_are_accessible(event, monkeypatch):
                 "test_user_id": "",
                 "test_auth_key": "",
             },
-            ["Test User ID", "Test Authentication key"],
+            ["Test user ID", "Test authentication key"],
         ),
     ],
 )

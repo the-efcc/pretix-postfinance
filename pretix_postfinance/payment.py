@@ -220,7 +220,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 (
                     "public_name",
                     forms.CharField(
-                        label=_("Display Name"),
+                        label=_("Display name"),
                         help_text=_(
                             "Custom name shown to customers during checkout. "
                             "Leave empty to use the default name 'PostFinance'."
@@ -278,7 +278,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 (
                     "test_space_id",
                     forms.CharField(
-                        label=_("Test Space ID"),
+                        label=_("Test space ID"),
                         help_text=_(
                             "Space ID for test mode. When the event is in test mode "
                             "and this is configured, payments will use test credentials. "
@@ -290,9 +290,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 (
                     "test_user_id",
                     forms.CharField(
-                        label=_("Test User ID"),
+                        label=_("Test user ID"),
                         help_text=_(
-                            "User ID for test mode. Required if Test Space ID is set."
+                            "User ID for test mode. Required if Test space ID is set."
                         ),
                         required=False,
                     ),
@@ -302,7 +302,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     SecretKeySettingsField(
                         label=_("Test authentication key"),
                         help_text=_(
-                            "Authentication key for test mode. Required if Test Space ID is set."
+                            "Authentication key for test mode. Required if Test space ID is set."
                         ),
                         required=False,
                     ),
@@ -310,7 +310,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 (
                     "allowed_payment_methods",
                     forms.MultipleChoiceField(
-                        label=_("Allowed Payment Methods"),
+                        label=_("Allowed payment methods"),
                         help_text=_(
                             "Select which payment methods are available to customers. "
                             "Leave empty to allow all payment methods. "
@@ -337,7 +337,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
             if cleaned_data.get("test_space_id"):
                 if not cleaned_data.get("test_user_id"):
-                    missing.append(str(_("Test User ID")))
+                    missing.append(str(_("Test user ID")))
                 if not cleaned_data.get("test_auth_key"):
                     missing.append(str(_("Test authentication key")))
 
@@ -354,8 +354,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         """
         Render additional content below the settings form.
 
-        Shows webhook URL and adds a "Test Connection" button that validates
-        the configured PostFinance credentials via AJAX, and a "Setup Webhooks"
+        Shows webhook URL and adds a "Test connection" button that validates
+        the configured PostFinance credentials via AJAX, and a "Setup webhooks"
         button to automatically configure webhooks in PostFinance.
         """
         template = get_template("pretixplugins/postfinance/control_settings.html")
@@ -436,7 +436,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     False,
                     str(
                         _(
-                            "Please configure test Space ID, User ID, and authentication Key "
+                            "Please configure test space ID, user ID, and authentication key "
                             "before testing the connection."
                         )
                     ),
@@ -445,7 +445,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 False,
                 str(
                     _(
-                        "Please configure Space ID, User ID, and authentication Key before "
+                        "Please configure Space ID, user ID, and authentication key before "
                         "testing the connection."
                     )
                 ),
@@ -496,7 +496,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     False,
                     str(
                         _(
-                            "Please configure test Space ID, User ID, and authentication Key "
+                            "Please configure test space ID, user ID, and authentication key "
                             "before setting up webhooks."
                         )
                     ),
@@ -505,7 +505,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 False,
                 str(
                     _(
-                        "Please configure Space ID, User ID, and authentication Key before "
+                        "Please configure Space ID, user ID, and authentication key before "
                         "setting up webhooks."
                     )
                 ),
