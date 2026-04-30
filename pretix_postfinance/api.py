@@ -15,6 +15,7 @@ from decimal import Decimal
 from postfinancecheckout import Configuration
 from postfinancecheckout.exceptions import ApiException
 from postfinancecheckout.models import (
+    AddressCreate,
     CreationEntityState,
     LineItemCreate,
     PaymentMethodConfiguration,
@@ -241,6 +242,7 @@ class PostFinanceClient:
         language: str | None = None,
         allowed_payment_method_configurations: list[int] | None = None,
         customer_email_address: str | None = None,
+        billing_address: AddressCreate | None = None,
     ) -> Transaction:
         """
         Create a new payment transaction.
@@ -256,6 +258,7 @@ class PostFinanceClient:
                 configuration IDs to restrict which payment methods are available.
                 If not provided, all configured payment methods are available.
             customer_email_address: Optional customer email to prefill on the payment page.
+            billing_address: Optional billing address used to prefill customer details.
 
         Returns:
             The created Transaction object.
@@ -272,6 +275,7 @@ class PostFinanceClient:
             language=language,
             allowedPaymentMethodConfigurations=allowed_payment_method_configurations,
             customerEmailAddress=customer_email_address,
+            billingAddress=billing_address,
         )
 
         try:

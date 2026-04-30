@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from django import forms
 from django.contrib import messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from postfinancecheckout.models import (
+    AddressCreate,
     LineItemCreate,
     LineItemType,
     TransactionState,
@@ -669,6 +670,61 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
         ]
 
+    def _build_transaction_billing_address(
+        self, payment: OrderPayment
+    ) -> AddressCreate | None:
+        try:
+            invoice_address = payment.order.invoice_address
+        except ObjectDoesNotExist:
+            return None
+
+        name_parts = invoice_address.name_parts or {}
+        given_name = name_parts.get("given_name") or None
+        family_name = name_parts.get("family_name") or None
+
+        if not given_name and not family_name:
+            # Pretix can store the customer name as a single field.
+            full_name = str(
+                name_parts.get("full_name") or invoice_address.name_cached or ""
+            ).strip()
+            if full_name:
+                given_name = full_name
+
+        billing_address = AddressCreate(
+            given_name=given_name,
+            family_name=family_name,
+            salutation=name_parts.get("salutation") or None,
+            organization_name=invoice_address.company or None,
+            street=invoice_address.street or None,
+            postcode=invoice_address.zipcode or None,
+            city=invoice_address.city or None,
+            country=str(invoice_address.country) or None,
+            postal_state=invoice_address.state_for_address or invoice_address.state or None,
+            sales_tax_number=invoice_address.vat_id or None,
+            email_address=payment.order.email or None,
+            phone_number=str(payment.order.phone) if payment.order.phone else None,
+        )
+
+        if not any(
+            [
+                billing_address.given_name,
+                billing_address.family_name,
+                billing_address.salutation,
+                billing_address.organization_name,
+                billing_address.street,
+                billing_address.postcode,
+                billing_address.city,
+                billing_address.country,
+                billing_address.postal_state,
+                billing_address.sales_tax_number,
+                billing_address.email_address,
+                billing_address.phone_number,
+            ]
+        ):
+            return None
+
+        return billing_address
+
     def _create_payment_transaction(
         self, payment: OrderPayment, detailed_line_items: bool = False
     ) -> tuple[int, str]:
@@ -704,6 +760,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             merchant_reference=f"{self.event.slug}-{payment.order.code}",
             allowed_payment_method_configurations=self._parse_allowed_payment_methods(),
             customer_email_address=payment.order.email,
+            billing_address=self._build_transaction_billing_address(payment),
         )
 
         transaction_id = transaction.id

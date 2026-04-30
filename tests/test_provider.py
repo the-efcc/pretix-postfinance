@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from postfinancecheckout.models import TransactionState
-from pretix.base.models import Order, OrderPayment, OrderRefund
+from pretix.base.models import InvoiceAddress, Order, OrderPayment, OrderRefund
 from pretix.base.payment import PaymentException
 
 from pretix_postfinance.api import PostFinanceError
@@ -188,6 +188,93 @@ def test_execute_payment_uses_order_line_items_for_new_checkout(
         "total": order.total,
         "currency": event.currency,
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "name_parts",
+        "expected_given_name",
+        "expected_family_name",
+        "expected_salutation",
+    ),
+    [
+        (
+            {
+                "_scheme": "salutation_given_family",
+                "salutation": "Ms",
+                "given_name": "Ada",
+                "family_name": "Lovelace",
+            },
+            "Ada",
+            "Lovelace",
+            "Ms",
+        ),
+        ({"_scheme": "full", "full_name": "Prince"}, "Prince", None, None),
+    ],
+    ids=["split-name", "full-name"],
+)
+def test_execute_payment_sends_customer_name_in_billing_address(
+    env,
+    rf,
+    monkeypatch,
+    transaction_factory,
+    name_parts,
+    expected_given_name,
+    expected_family_name,
+    expected_salutation,
+):
+    event, order = env
+
+    captured_kwargs = {}
+
+    def capture_create_transaction(self, **kwargs):
+        captured_kwargs.update(kwargs)
+        return transaction_factory(id=999888)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.create_transaction",
+        capture_create_transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_payment_page_url",
+        lambda self, tid: f"https://checkout.postfinance.ch/pay/{tid}",
+    )
+
+    InvoiceAddress.objects.create(
+        order=order,
+        name_parts=name_parts,
+        company="Analytical Engines Ltd",
+        street="Main Street 1",
+        zipcode="8000",
+        city="Zurich",
+        country="CH",
+        country_old="CH",
+        state="ZH",
+        vat_id="CHE-123.456.789 VAT",
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.get("/")
+    req.session = {}
+
+    payment = order.payments.create(provider="postfinance", amount=order.total)
+    result = prov.execute_payment(req, payment)
+
+    assert result == "https://checkout.postfinance.ch/pay/999888"
+    billing_address = captured_kwargs["billing_address"]
+    assert billing_address is not None
+    assert billing_address.given_name == expected_given_name
+    assert billing_address.family_name == expected_family_name
+    assert billing_address.salutation == expected_salutation
+    assert billing_address.organization_name == "Analytical Engines Ltd"
+    assert billing_address.email_address == order.email
+    assert billing_address.street == "Main Street 1"
+    assert billing_address.postcode == "8000"
+    assert billing_address.city == "Zurich"
+    assert billing_address.country == "CH"
+    assert billing_address.postal_state == "ZH"
+    assert billing_address.sales_tax_number == "CHE-123.456.789 VAT"
 
 
 @pytest.mark.django_db
