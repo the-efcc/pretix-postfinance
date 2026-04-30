@@ -1,32 +1,15 @@
 {% load i18n %}
 
-<p><strong>{% trans "Your payment is being processed." %}</strong></p>
+<p><strong>{% trans "Your order is awaiting payment." %}</strong></p>
 
-{% if state == "PENDING" %}
-    <p>{% blocktrans trimmed %}
-        Your payment has been initiated and is waiting for confirmation
-        from your bank or payment provider.
-    {% endblocktrans %}</p>
-{% elif state == "PROCESSING" %}
-    <p>{% blocktrans trimmed %}
-        Your payment is currently being processed. This usually takes a few moments.
-    {% endblocktrans %}</p>
-{% else %}
-    <p>{% blocktrans trimmed %}
-        Your payment is being verified. You will receive a confirmation email
-        once completed.
-    {% endblocktrans %}</p>
-{% endif %}
+<p>{% blocktrans trimmed with email=order.email %}
+    If you chose to pay by bank transfer, we have sent an email to
+    <strong>{{ email }}</strong> with the IBAN, amount, and the payment
+    reference you must include when making the transfer from your bank.
+{% endblocktrans %}</p>
 
-{% if transaction_id %}
-    <p>{% trans "Transaction reference" %}: <code>{{ transaction_id }}</code></p>
-{% endif %}
-
-<div class="alert alert-info" style="margin-top: 15px;">
-    <strong>{% trans "What happens next?" %}</strong>
-    <ul style="margin: 10px 0 0 0;">
-        <li>{% trans "Most payments are confirmed within a few minutes" %}</li>
-        <li>{% trans "You will receive an email confirmation once your payment is complete" %}</li>
-        <li>{% trans "You can refresh this page to check for updates" %}</li>
-    </ul>
-</div>
+<p>{% blocktrans trimmed %}
+    If you chose an automatic payment method, it is currently being processed.
+    This usually takes a few moments.
+    You will receive a confirmation email once completed.
+{% endblocktrans %}</p>
