@@ -47,12 +47,20 @@ class TestWebhookTransactionStates:
         "webhook_state,transaction_state,initial_payment_state,expected_payment_state,expected_order_status",
         [
             pytest.param(
-                "COMPLETED",
-                TransactionState.COMPLETED,
+                "FULFILL",
+                TransactionState.FULFILL,
                 OrderPayment.PAYMENT_STATE_PENDING,
                 OrderPayment.PAYMENT_STATE_CONFIRMED,
                 Order.STATUS_PAID,
-                id="completed_marks_paid",
+                id="fulfill_marks_paid",
+            ),
+            pytest.param(
+                "COMPLETED",
+                TransactionState.COMPLETED,
+                OrderPayment.PAYMENT_STATE_PENDING,
+                OrderPayment.PAYMENT_STATE_PENDING,
+                Order.STATUS_PENDING,
+                id="completed_keeps_pending",
             ),
             pytest.param(
                 "FAILED",

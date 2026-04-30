@@ -32,13 +32,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# PostFinance transaction states that indicate payment is captured/settled
-# FULFILL = final state, money confirmed, safe to deliver goods
-# COMPLETED = transfer initiated, waiting for final confirmation
-# Note: AUTHORIZED means reservation only - funds NOT transferred yet
+# PostFinance transaction states that indicate payment is settled.
+# Only FULFILL guarantees funds have been received — for asynchronous
+# payment methods like bank transfers, COMPLETED means the transfer was
+# initiated but money has not yet arrived.
 SUCCESS_STATES = {
     TransactionState.FULFILL,
-    TransactionState.COMPLETED,
 }
 
 # PostFinance transaction states that indicate failed payment
@@ -1034,6 +1033,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     state,
                 )
             else:
+                payment.refresh_from_db()
+                if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
+                    cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
+                    payment.save(update_fields=["state"])
                 logger.info(
                     "Payment %s is pending (PostFinance state: %s)",
                     payment.pk,

@@ -17,12 +17,21 @@ from pretix_postfinance.payment import PostFinancePaymentProvider
 @pytest.mark.parametrize(
     "state,expected_order_status,expected_payment_state",
     [
-        (TransactionState.COMPLETED, Order.STATUS_PAID, None),
-        (TransactionState.AUTHORIZED, Order.STATUS_PENDING, None),
+        (TransactionState.FULFILL, Order.STATUS_PAID, None),
+        (
+            TransactionState.COMPLETED,
+            Order.STATUS_PENDING,
+            OrderPayment.PAYMENT_STATE_PENDING,
+        ),
+        (
+            TransactionState.AUTHORIZED,
+            Order.STATUS_PENDING,
+            OrderPayment.PAYMENT_STATE_PENDING,
+        ),
         (TransactionState.FAILED, Order.STATUS_PENDING, OrderPayment.PAYMENT_STATE_FAILED),
         (TransactionState.DECLINE, Order.STATUS_PENDING, OrderPayment.PAYMENT_STATE_FAILED),
     ],
-    ids=["completed", "authorized", "failed", "declined"],
+    ids=["fulfill", "completed", "authorized", "failed", "declined"],
 )
 def test_execute_payment_transaction_states(
     env, rf, monkeypatch, transaction_factory, state, expected_order_status, expected_payment_state
@@ -37,7 +46,11 @@ def test_execute_payment_transaction_states(
     prov = PostFinancePaymentProvider(event)
     req = rf.post("/")
 
-    payment = order.payments.create(provider="postfinance", amount=order.total)
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+    )
     req.session = {
         "payment_postfinance_transaction_id": 123456,
         "payment_postfinance_transaction_payment_id": payment.pk,
@@ -602,7 +615,7 @@ def test_execute_payment_uses_persisted_transaction_without_session(
 
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_transaction",
-        lambda self, tid: transaction_factory(id=tid, state=TransactionState.COMPLETED),
+        lambda self, tid: transaction_factory(id=tid, state=TransactionState.FULFILL),
     )
 
     prov = PostFinancePaymentProvider(event)
