@@ -12,6 +12,8 @@ from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
+from i18nfield.forms import I18nFormField, I18nTextarea, I18nTextInput
+from i18nfield.strings import LazyI18nString
 from postfinancecheckout.models import (
     AddressCreate,
     LineItemCreate,
@@ -146,7 +148,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         If a custom display name is configured in event settings, use that.
         Otherwise fall back to the default verbose name.
         """
-        return str(self.settings.get("public_name")) or self.verbose_name
+        return str(self.settings.get("public_name", as_type=LazyI18nString)) or self.verbose_name
 
     def _get_payment_method_choices(self) -> list[tuple[str, str]]:
         """
@@ -219,24 +221,26 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             + [
                 (
                     "public_name",
-                    forms.CharField(
+                    I18nFormField(
                         label=_("Display name"),
                         help_text=_(
                             "Custom name shown to customers during checkout. "
                             "Leave empty to use the default name 'PostFinance'."
                         ),
+                        widget=I18nTextInput,
                         required=False,
                     ),
                 ),
                 (
                     "description",
-                    forms.CharField(
+                    I18nFormField(
                         label=_("Description"),
                         help_text=_(
                             "Custom description shown on the checkout page. "
                             "Leave empty to use the default message."
                         ),
-                        widget=forms.Textarea(attrs={"rows": 3}),
+                        widget=I18nTextarea,
+                        widget_kwargs={"attrs": {"rows": 3}},
                         required=False,
                     ),
                 ),
@@ -916,7 +920,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             "request": request,
             "event": self.event,
             "provider": self,
-            "description": self.settings.get("description"),
+            "description": self.settings.get("description", as_type=LazyI18nString),
         }
         return template.render(ctx)
 

@@ -181,8 +181,6 @@ def test_all_settings_form_fields_are_accessible(event, monkeypatch):
         "space_id": "99999",
         "user_id": "88888",
         "auth_key": "test-key-value",
-        "public_name": "Test Name",
-        "description": "Test Description",
         "capture_mode": "immediate",
     }
 
