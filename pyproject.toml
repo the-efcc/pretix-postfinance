@@ -44,8 +44,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/sweenu/pretix-postfinance"
-Repository = "https://github.com/sweenu/pretix-postfinance"
+Homepage = "https://github.com/the-efcc/pretix-postfinance"
+Repository = "https://github.com/the-efcc/pretix-postfinance"
 
 [project.entry-points."pretix.plugin"]
 pretix_postfinance = "pretix_postfinance:PretixPluginMeta"
