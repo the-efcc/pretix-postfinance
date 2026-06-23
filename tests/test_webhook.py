@@ -154,6 +154,52 @@ class TestWebhookTransactionStates:
         order.refresh_from_db()
         assert order.status == expected_order_status
 
+    @pytest.mark.django_db
+    def test_transaction_webhook_persists_info_data(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The transaction webhook must persist the live transaction state into
+        info_data. payment_refund_supported() reads info_data["state"], so a
+        dropped write here breaks automatic refunds on confirmed payments.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FULFILL
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "TWINT"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 123456, "state": "AUTHORIZED"}),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="FULFILL")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+            assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+            assert payment.info_data.get("state") == "FULFILL"
+            assert payment.info_data.get("payment_method") == "TWINT"
+
 
 class TestWebhookSignatureValidation:
     @pytest.mark.django_db

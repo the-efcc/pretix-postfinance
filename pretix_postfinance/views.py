@@ -265,14 +265,15 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     if transaction.payment_connector_configuration:
         payment_method = transaction.payment_connector_configuration.name
 
-    payment.info_data = payment.info_data or {}
-    payment.info_data.update(
+    info_data = payment.info_data or {}
+    info_data.update(
         {
             "transaction_id": entity_id,
             "state": transaction_state.value if transaction_state else None,
             "payment_method": payment_method,
         }
     )
+    payment.info_data = info_data
     payment.save(update_fields=["info"])
 
     payment.order.log_action(
