@@ -142,30 +142,6 @@ def test_execute_installment_charges_event_currency(
 
 
 @pytest.mark.django_db
-def test_execute_installment_restricts_to_allowed_payment_methods(
-    chf_event, order, monkeypatch, charge_calls
-):
-    """
-    A token charge is limited to the same connectors as the first payment.
-
-    Left unrestricted, PostFinance weighs every connector in the space, and
-    in a space whose other connectors cannot take a customer-not-present
-    charge it answers "There is no payment connector configured which is
-    applicable."
-    """
-    chf_event.settings.set("payment_postfinance_allowed_payment_methods", ["111", "222"])
-    chf_event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")
-    successful_charge(monkeypatch)
-    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
-    installment = make_installment(plan, number=2)
-
-    prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment, make_payment(order)) is True
-
-    assert charge_calls["create"]["allowed_payment_method_configurations"] == [111, 222]
-
-
-@pytest.mark.django_db
 def test_execute_installment_charges_alternative_currency(
     alt_currency_event, order, monkeypatch, charge_calls
 ):

@@ -2059,9 +2059,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     plan.order.code,
                     installment_number=installment.installment_number,
                 ),
-                allowed_payment_method_configurations=self._parse_allowed_payment_methods(
-                    client.space_id
-                ),
                 token=token_id,
                 customers_presence=CustomersPresence.NOT_PRESENT,
                 customer_id=token_data.get("customer_id"),
