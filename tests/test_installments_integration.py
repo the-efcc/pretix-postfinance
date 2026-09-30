@@ -115,7 +115,7 @@ def postfinance(monkeypatch):
         if api.decline is not None:
             return SimpleNamespace(
                 state=ChargeState.FAILED,
-                failure_reason=SimpleNamespace(description=api.decline),
+                failure_reason=SimpleNamespace(description={"en-US": api.decline}),
                 transaction=SimpleNamespace(
                     id=tid,
                     state=TransactionState.FAILED,

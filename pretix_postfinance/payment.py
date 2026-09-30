@@ -146,6 +146,25 @@ def _line_item_type(amount: Decimal, positive_type: LineItemType) -> LineItemTyp
     return positive_type
 
 
+def _localized(texts: dict[str, str] | None, locale: str | None) -> str | None:
+    """
+    Pick one text out of a PostFinance ``{"en-US": "...", ...}`` mapping.
+
+    Prefers the order's language (pretix's ``de-informal`` matches
+    PostFinance's ``de-CH``), then English, then whatever there is.
+    """
+    if not texts:
+        return None
+    language = (locale or "").split("-")[0].lower()
+    by_language = {key.split("-")[0].lower(): text for key, text in texts.items()}
+    return (
+        by_language.get(language)
+        or texts.get("en-US")
+        or by_language.get("en")
+        or next(iter(texts.values()))
+    )
+
+
 class PostFinancePaymentProvider(BasePaymentProvider):
     """
     PostFinance Checkout payment provider for pretix.
@@ -2118,7 +2137,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if charge_state == ChargeState.FAILED:
                 failure_reason = None
                 if charge.failure_reason:
-                    failure_reason = charge.failure_reason.description
+                    failure_reason = _localized(
+                        charge.failure_reason.description, plan.order.locale
+                    )
                 logger.warning(
                     "Installment %s for order %s failed (PostFinance charge state: %s, "
                     "reason: %s)",

@@ -362,7 +362,7 @@ def test_failed_charge_is_recorded_on_the_payment(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
         lambda self, tid: SimpleNamespace(
             state=ChargeState.FAILED,
-            failure_reason=SimpleNamespace(description="Insufficient funds"),
+            failure_reason=SimpleNamespace(description={"en-US": "Insufficient funds"}),
             transaction=charged_transaction(state=TransactionState.FAILED),
         ),
     )
@@ -399,7 +399,9 @@ def test_execute_installment_records_charge_failure(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
         lambda self, tid: SimpleNamespace(
             state=ChargeState.FAILED,
-            failure_reason=SimpleNamespace(description="Insufficient funds"),
+            # PostFinance localizes the description itself: the SDK hands
+            # back one text per language, not a string.
+            failure_reason=SimpleNamespace(description={"en-US": "Insufficient funds"}),
             transaction=charged_transaction(state=TransactionState.FAILED),
         ),
     )
@@ -410,6 +412,29 @@ def test_execute_installment_records_charge_failure(
     prov = PostFinancePaymentProvider(chf_event)
     assert prov.execute_installment(plan, installment, payment) is False
     assert installment.failure_reason == "Insufficient funds"
+
+
+@pytest.mark.django_db
+def test_execute_installment_failure_reason_in_order_language(
+    chf_event, order, monkeypatch, charge_calls
+):
+    order.locale = "de-informal"
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token",
+        lambda self, tid: SimpleNamespace(
+            state=ChargeState.FAILED,
+            failure_reason=SimpleNamespace(
+                description={"en-US": "Insufficient funds", "de-CH": "Ungenügende Deckung"}
+            ),
+            transaction=charged_transaction(state=TransactionState.FAILED),
+        ),
+    )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, make_payment(order)) is False
+    assert installment.failure_reason == "Ungenügende Deckung"
 
 
 @pytest.mark.django_db
@@ -613,7 +638,7 @@ def test_postfinance_wording_is_passed_through(chf_event, order, monkeypatch, ch
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
         lambda self, tid: SimpleNamespace(
             state=ChargeState.FAILED,
-            failure_reason=SimpleNamespace(description="Insufficient funds"),
+            failure_reason=SimpleNamespace(description={"en-US": "Insufficient funds"}),
             transaction=charged_transaction(state=TransactionState.FAILED),
         ),
     )
