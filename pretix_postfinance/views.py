@@ -21,7 +21,6 @@ from django_scopes import scopes_disabled
 from pretix.base.models import Event, OrderPayment, OrderRefund
 from pretix.base.permissions import AnyPermissionOf
 from pretix.control.permissions import EventPermissionRequiredMixin
-from pretix.helpers.urls import build_absolute_uri
 
 from ._types import PretixHttpRequest
 from .api import (
@@ -36,6 +35,7 @@ from .payment import (
     PROVIDER_IDENTIFIERS,
     SPACE_ID_KEY,
     SUCCESS_STATES,
+    webhook_url,
 )
 
 
@@ -646,6 +646,5 @@ class PostFinanceSetupWebhooksView(EventPermissionRequiredMixin, View):
             )
 
         mode = _validate_mode(request.POST.get("mode")) or "live"
-        webhook_url = build_absolute_uri("plugins:pretix_postfinance:postfinance.webhook")
-        success, message = provider.setup_webhooks(webhook_url, mode=mode)
+        success, message = provider.setup_webhooks(webhook_url(), mode=mode)
         return JsonResponse({"success": success, "message": message})
