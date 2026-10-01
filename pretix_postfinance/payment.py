@@ -37,6 +37,7 @@ from pretix.multidomain.urlreverse import build_absolute_uri
 from .api import PostFinanceClient, PostFinanceError
 from .installments import (
     installments_available,
+    plan_accepts_token,
     plan_for_order,
     scheduled_installment_for_payment,
 )
@@ -1634,15 +1635,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.pk,
             )
 
-            if state in SUCCESS_STATES:
-                # Check if already confirmed (webhook may have processed first)
-                payment.refresh_from_db()
+            # Check if already confirmed (webhook may have processed first)
+            payment.refresh_from_db()
 
-                # A plan's first payment leaves behind the token every
-                # later installment is charged against, so it has to be
-                # stored before the payment is confirmed.
+            # A plan's first payment leaves behind the token every later
+            # installment is charged against. The token exists from the moment
+            # the transaction is tokenized, so this is deliberately not gated
+            # on SUCCESS_STATES: a customer returning while the transaction was
+            # still AUTHORIZED used to leave the plan with no token at all, and
+            # nothing later could repair it. Only a failed transaction has no
+            # token worth keeping.
+            if state not in FAILURE_STATES:
                 self.store_installment_token(payment, transaction)
 
+            if state in SUCCESS_STATES:
                 if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                     logger.info(
                         "Payment %s already confirmed, skipping (PostFinance state: %s)",
@@ -1887,6 +1893,18 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             logger.warning(
                 "Installment payment %s has no plan to store a token on",
                 payment.pk,
+            )
+            return
+
+        if not plan_accepts_token(plan):
+            # The token is stored from several points now, including ones that
+            # can fire long after the fact, so a plan pretix has already closed
+            # out has to refuse it: the token it held was revoked upstream when
+            # it was cleared, and recording another would only look chargeable.
+            logger.info(
+                "Not storing a token on installment plan %s: its status is %s",
+                plan.pk,
+                getattr(plan, "status", None),
             )
             return
 

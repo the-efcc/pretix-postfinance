@@ -551,6 +551,125 @@ def test_webhook_stores_the_token_when_the_customer_never_returns(
 
 
 @pytest.mark.django_db
+def test_first_payment_stores_the_token_before_it_reaches_fulfill(
+    installments_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    The token is kept even when the customer returns during AUTHORIZED.
+
+    It exists from the moment the transaction is tokenized, and tying the
+    store to FULFILL meant a customer who came back a second or two early
+    left the plan with no token and no way to get one.
+    """
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.AUTHORIZED
+
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    payment = first_payment_of(plan)
+    pay_first_installment(installments_event, payment)
+
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+    assert plan.payment_token[METHOD_CONFIG_KEY] == METHOD_CONFIG_ID
+    # AUTHORIZED is not money received, so the payment stays unconfirmed.
+    assert payment.state != OrderPayment.PAYMENT_STATE_CONFIRMED
+
+
+@pytest.mark.django_db
+def test_first_payment_stores_no_token_when_the_transaction_failed(
+    installments_event, installments_order, pay_first_installment, postfinance
+):
+    """A card that was declined is not worth keeping for later charges."""
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.FAILED
+
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+
+@pytest.mark.django_db
+def test_webhook_repairs_a_plan_whose_payment_was_confirmed_elsewhere(
+    installments_event, installments_order, monkeypatch, postfinance
+):
+    """
+    A payment settled by another route can still have its token recovered.
+
+    An organizer marking a payment paid leaves the plan with no token, and the
+    webhook used to return at the already-settled check before storing one,
+    which left the plan permanently unchargeable.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    payment = first_payment_of(plan)
+    payment.info_data = {"transaction_id": 123456, "space_id": "12345"}
+    payment.save(update_fields=["info"])
+    payment.confirm()
+    payment.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: fulfilled_transaction(),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+
+    with scopes_disabled():
+        _process_transaction_webhook(123456, 12345)
+
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+    # Which is the point: the remaining installments can now be charged.
+    assert process_single_installment(due(plan, 2)) is True
+
+
+@pytest.mark.django_db
+def test_a_closed_plan_refuses_a_late_token(
+    installments_event, installments_order, monkeypatch, postfinance
+):
+    """
+    pretix revokes and clears the token when a plan closes, so a late webhook
+    must not record another: it no longer exists upstream, and a plan holding
+    it would only look chargeable.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    payment = first_payment_of(plan)
+    payment.info_data = {"transaction_id": 123456, "space_id": "12345"}
+    payment.save(update_fields=["info"])
+    plan.status = InstallmentPlan.STATUS_CANCELLED
+    plan.save(update_fields=["status"])
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: fulfilled_transaction(),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+
+    with scopes_disabled():
+        _process_transaction_webhook(123456, 12345)
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+
+@pytest.mark.django_db
 def test_missing_token_leaves_the_plan_chargeable_by_hand(
     installments_event, installments_order, pay_first_installment, postfinance
 ):
