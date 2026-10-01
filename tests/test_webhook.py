@@ -597,6 +597,94 @@ class TestWebhookIdempotency:
             assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
 
     @pytest.mark.django_db
+    def test_already_confirmed_payment_still_offers_its_token(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The token store runs ahead of the already-settled check.
+
+        A payment confirmed by another route — an organizer marking it paid —
+        leaves its installment plan with no token, and returning before the
+        store left the plan permanently unchargeable. Asserted on the call
+        rather than on a plan so this also runs on an upstream pretix, which
+        has no installments at all.
+        """
+        event, order = webhook_env
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FULFILL
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "Visa"
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        offered: list[int] = []
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.store_installment_token",
+            lambda self, payment, transaction: offered.append(payment.pk),
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 123456}),
+                state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+        assert offered == [payment.pk]
+
+    @pytest.mark.django_db
+    def test_a_failed_transaction_offers_no_token(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """A declined card is not worth storing for later charges."""
+        event, order = webhook_env
+
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.FAILED
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "Visa"
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        offered: list[int] = []
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.store_installment_token",
+            lambda self, payment, transaction: offered.append(payment.pk),
+        )
+
+        with scopes_disabled():
+            order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 123456}),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 200
+        assert offered == []
+
+    @pytest.mark.django_db
     def test_no_matching_payment_returns_200(
         self, webhook_env, client, monkeypatch, valid_signature
     ):
