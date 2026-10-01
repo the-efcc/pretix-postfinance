@@ -116,6 +116,27 @@ Configure the plugin in the event's payment settings:
   are offered. Save the credentials first, then reload the page to populate
   the list.
 
+#### Sending callbacks to another host
+
+"Setup webhooks" registers this instance's own address with PostFinance, which
+is what you want in production. An instance PostFinance cannot reach under that
+address — a staging instance behind a VPN, say — can name a different host in
+`pretix.cfg`:
+
+```ini
+[postfinance]
+webhook_base_url = https://pretix-staging.example.org
+```
+
+or through the equivalent `PRETIX_POSTFINANCE_WEBHOOK_BASE_URL` environment
+variable. Only the scheme and host are taken from it; the path always comes
+from the plugin's URL config, so the registered URL cannot drift away from the
+route that actually serves it. The payment settings page shows the resulting
+URL, so you can check it before pressing the button.
+
+That host has to reach this instance over the public internet. Exposing only
+`/_postfinance/webhook/` is enough — no other route needs to be public.
+
 ## Features
 
 - Payment processing via PostFinance Checkout

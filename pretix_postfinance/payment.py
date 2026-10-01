@@ -4,6 +4,7 @@ import logging
 from collections import OrderedDict
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
+from urllib.parse import urlparse, urlunparse
 
 from django import forms
 from django.conf import settings as django_settings
@@ -129,6 +130,63 @@ METHOD_CHOICES_CACHE_TIMEOUT = 300
 # All provider identifiers used by this plugin. Payments and refunds may be
 # stored under any of these.
 PROVIDER_IDENTIFIERS = (MAIN_PROVIDER_IDENTIFIER, PROD_PROVIDER_IDENTIFIER)
+
+WEBHOOK_URL_NAME = "plugins:pretix_postfinance:postfinance.webhook"
+
+# pretix.cfg section and option overriding the host PostFinance calls back on.
+WEBHOOK_BASE_URL_SECTION = "postfinance"
+WEBHOOK_BASE_URL_OPTION = "webhook_base_url"
+
+
+def _configured_webhook_base_url() -> str:
+    """Read the webhook base URL override from pretix.cfg, if it is set."""
+    config = getattr(django_settings, "CONFIG_FILE", None)
+    if config is None:
+        return ""
+    return (
+        config.get(
+            WEBHOOK_BASE_URL_SECTION,
+            WEBHOOK_BASE_URL_OPTION,
+            fallback="",
+        )
+        or ""
+    ).strip()
+
+
+def webhook_url() -> str:
+    """
+    The URL PostFinance should send callbacks to.
+
+    Normally this instance's own address. An instance PostFinance cannot reach
+    under that address — staging behind a VPN, say — can name a different host
+    in pretix.cfg:
+
+        [postfinance]
+        webhook_base_url = https://pretix-staging.example.org
+
+    or through the matching PRETIX_POSTFINANCE_WEBHOOK_BASE_URL environment
+    variable. Only the scheme and host are taken from it; the path always comes
+    from the URL config, so an override cannot drift away from the real route.
+    """
+    built = urlparse(build_global_uri(WEBHOOK_URL_NAME))
+
+    base = _configured_webhook_base_url()
+    if not base:
+        return urlunparse(built)
+
+    # Without a scheme urlparse reads "host" as a path and "host:8443" as a
+    # scheme, so neither yields a netloc; assume https and re-parse.
+    override = urlparse(base if "://" in base else f"https://{base}")
+    if not override.netloc:
+        logger.warning(
+            "Ignoring [%s] %s=%r: no host in it",
+            WEBHOOK_BASE_URL_SECTION,
+            WEBHOOK_BASE_URL_OPTION,
+            base,
+        )
+        return urlunparse(built)
+
+    return urlunparse(built._replace(scheme=override.scheme, netloc=override.netloc))
 
 
 def _line_item_type(amount: Decimal, positive_type: LineItemType) -> LineItemType:
@@ -666,9 +724,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         template = get_template("pretixplugins/postfinance/control_settings.html")
         ctx = {
             "request": request,
-            "webhook_url": build_global_uri(
-                "plugins:pretix_postfinance:postfinance.webhook",
-            ),
+            "webhook_url": webhook_url(),
             "test_url": reverse(
                 "plugins:pretix_postfinance:postfinance.test_connection",
                 kwargs={
