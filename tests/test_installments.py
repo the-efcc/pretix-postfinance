@@ -9,6 +9,7 @@ code against the real models.
 
 from __future__ import annotations
 
+import json
 import pathlib
 from decimal import Decimal
 from types import SimpleNamespace
@@ -18,7 +19,11 @@ import pytest
 from postfinancecheckout.models import ChargeState, TransactionState
 
 from pretix_postfinance.api import PostFinanceError
-from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.payment import (
+    INSTALLMENT_CHARGE_KEY,
+    METHOD_CONFIG_KEY,
+    PostFinancePaymentProvider,
+)
 
 
 @pytest.fixture
@@ -148,10 +153,9 @@ def test_execute_installment_restricts_to_allowed_payment_methods(
     """
     A token charge is limited to the same connectors as the first payment.
 
-    Left unrestricted, PostFinance weighs every connector in the space, and
-    in a space whose other connectors cannot take a customer-not-present
-    charge it answers "There is no payment connector configured which is
-    applicable."
+    This is the fallback for a plan whose own method configuration cannot be
+    established; a narrower list than nothing, which is what makes PostFinance
+    answer "There is no payment connector configured which is applicable."
     """
     chf_event.settings.set("payment_postfinance_allowed_payment_methods", ["111", "222"])
     chf_event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")
@@ -163,6 +167,102 @@ def test_execute_installment_restricts_to_allowed_payment_methods(
     assert prov.execute_installment(plan, installment, make_payment(order)) is True
 
     assert charge_calls["create"]["allowed_payment_method_configurations"] == [111, 222]
+
+
+@pytest.mark.django_db
+def test_execute_installment_prefers_the_tokens_own_method_configuration(
+    chf_event, order, monkeypatch, charge_calls
+):
+    """
+    The token's own configuration wins over the event's allowed methods.
+
+    The event list says what a customer may pick at checkout; an automatic
+    charge has no choice to make, and only the connector that created the
+    token can serve it.
+    """
+    chf_event.settings.set("payment_postfinance_allowed_payment_methods", ["111", "222"])
+    chf_event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")
+    successful_charge(monkeypatch)
+    plan = make_plan(chf_event, order, token={**STORED_TOKEN, METHOD_CONFIG_KEY: 80778})
+    installment = make_installment(plan, number=2)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, make_payment(order)) is True
+
+    assert charge_calls["create"]["allowed_payment_method_configurations"] == [80778]
+
+
+@pytest.mark.django_db
+def test_execute_installment_learns_the_method_configuration_from_the_first_payment(
+    chf_event, order, monkeypatch, charge_calls
+):
+    """
+    A plan tokenized before the configuration was recorded recovers by itself.
+
+    It is read back off the interactive payment's transaction and kept, so the
+    lookup happens once rather than on every installment.
+    """
+    order.payments.create(
+        provider="postfinance",
+        state="confirmed",
+        amount=Decimal("100.00"),
+        info=json.dumps({"transaction_id": 583456262, "space_id": "12345"}),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: SimpleNamespace(
+            id=tid, payment_connector_configuration=SimpleNamespace(id=116916)
+        ),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_method_configuration_of_connector",
+        lambda self, connector_id: 80778 if connector_id == 116916 else None,
+    )
+    successful_charge(monkeypatch)
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan, number=2)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, make_payment(order)) is True
+
+    assert charge_calls["create"]["allowed_payment_method_configurations"] == [80778]
+    assert plan.payment_token[METHOD_CONFIG_KEY] == 80778
+
+
+@pytest.mark.django_db
+def test_execute_installment_does_not_learn_from_an_automatic_charge(
+    chf_event, order, monkeypatch, charge_calls
+):
+    """
+    Only an interactive payment names the connector that created the token.
+
+    An earlier automatic charge is a charge *against* the token, so reading a
+    configuration off it would just repeat whatever that attempt used.
+    """
+    order.payments.create(
+        provider="postfinance",
+        state="failed",
+        amount=Decimal("100.00"),
+        info=json.dumps({"transaction_id": 999, INSTALLMENT_CHARGE_KEY: True}),
+    )
+    looked_up: list[int] = []
+
+    def get_transaction(self, tid):
+        looked_up.append(tid)
+        return SimpleNamespace(id=tid, payment_connector_configuration=None)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction", get_transaction
+    )
+    successful_charge(monkeypatch)
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan, number=2)
+
+    prov = PostFinancePaymentProvider(chf_event)
+    assert prov.execute_installment(plan, installment, make_payment(order)) is True
+
+    assert looked_up == []
+    assert charge_calls["create"]["allowed_payment_method_configurations"] is None
 
 
 @pytest.mark.django_db
