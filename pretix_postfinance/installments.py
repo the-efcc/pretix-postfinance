@@ -50,6 +50,28 @@ def scheduled_installment_for_payment(payment: OrderPayment) -> Any | None:
     return scheduled_installment.objects.filter(payment=payment).first()
 
 
+def plan_accepts_token(plan: Any) -> bool:
+    """
+    Whether storing a token on this plan still means anything.
+
+    pretix revokes the token at the provider and clears it when a plan
+    completes or is cancelled, so writing one back would record a token that
+    no longer exists upstream. A failed plan keeps its token on purpose: the
+    customer can recover such a plan by paying again.
+
+    An unrecognised status counts as acceptable, so a plan object without the
+    field is not silently refused.
+    """
+    models = _models()
+    if models is None:
+        return False
+    installment_plan, _scheduled_installment = models
+    return getattr(plan, "status", None) not in (
+        installment_plan.STATUS_COMPLETED,
+        installment_plan.STATUS_CANCELLED,
+    )
+
+
 def plan_for_order(order: Order) -> Any | None:
     """
     Return the installment plan of an order, or ``None`` if it has none.

@@ -70,6 +70,59 @@ def test_execute_payment_transaction_states(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "state,offers_token",
+    [
+        (TransactionState.FULFILL, True),
+        (TransactionState.COMPLETED, True),
+        (TransactionState.AUTHORIZED, True),
+        (TransactionState.FAILED, False),
+        (TransactionState.DECLINE, False),
+        (TransactionState.VOIDED, False),
+    ],
+    ids=["fulfill", "completed", "authorized", "failed", "declined", "voided"],
+)
+def test_execute_payment_stores_the_token_before_fulfill(
+    env, rf, monkeypatch, transaction_factory, state, offers_token
+):
+    """
+    Keeping a token is not the same decision as confirming a payment.
+
+    The token exists from the moment the transaction is tokenized, so it is
+    stored for any state but a failure. Gating it on FULFILL meant a customer
+    who returned while the transaction was still AUTHORIZED left the plan with
+    no token, and nothing later could repair it. Asserted on the call so this
+    also runs on an upstream pretix, which has no installments.
+    """
+    event, order = env
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_transaction",
+        lambda self, tid: transaction_factory(state=state),
+    )
+    offered: list[int] = []
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinancePaymentProvider.store_installment_token",
+        lambda self, payment, transaction: offered.append(payment.pk),
+    )
+
+    prov = PostFinancePaymentProvider(event)
+    req = rf.post("/")
+    payment = order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        state=OrderPayment.PAYMENT_STATE_CREATED,
+    )
+    req.session = {
+        "payment_postfinance_transaction_id": 123456,
+        "payment_postfinance_transaction_payment_id": payment.pk,
+    }
+    prov.execute_payment(req, payment)
+
+    assert offered == ([payment.pk] if offers_token else [])
+
+
+@pytest.mark.django_db
 def test_execute_payment_api_error(env, rf, monkeypatch):
     event, order = env
 

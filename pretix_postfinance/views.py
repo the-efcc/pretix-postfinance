@@ -519,6 +519,28 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
         },
     )
 
+    # Ahead of the already-settled check below, and not gated on
+    # SUCCESS_STATES: if the customer never returns from the payment page this
+    # is the only place the transaction's token is ever seen, and a payment
+    # settled by some other route — an organizer marking it paid — would
+    # otherwise leave its plan permanently unchargeable, because every later
+    # webhook returns at that check first. Returning rather than confirming on
+    # failure is deliberate: PostFinance retries, and a plan is better served
+    # by another attempt than by a confirmed payment with no token.
+    if transaction_state not in FAILURE_STATES:
+        try:
+            provider = payment.payment_provider
+            if provider is not None:
+                provider.store_installment_token(payment, transaction)
+        except Exception as e:
+            logger.exception(
+                "PostFinance webhook: error storing the installment token of "
+                "payment %s: %s",
+                payment.pk,
+                e,
+            )
+            return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
+
     if payment.state in (
         OrderPayment.PAYMENT_STATE_CONFIRMED,
         OrderPayment.PAYMENT_STATE_REFUNDED,
@@ -527,14 +549,6 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
 
     if transaction_state in SUCCESS_STATES:
         try:
-            # If the customer never returns from the payment page, this is
-            # the only place the transaction's token is ever seen, and an
-            # installment plan without a stored token cannot be charged
-            # again. Store it before confirming, which settles installment
-            # one and hands the plan over to the scheduled charges.
-            provider = payment.payment_provider
-            if provider is not None:
-                provider.store_installment_token(payment, transaction)
             payment.confirm()
             logger.info("PostFinance webhook: payment %s confirmed", payment.pk)
             return (WEBHOOK_STATUS_OK, True)
