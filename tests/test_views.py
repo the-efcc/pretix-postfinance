@@ -144,3 +144,32 @@ class TestSetupWebhooksView:
 
         assert response.status_code == 200
         assert captured["mode"] == "live"
+
+    @pytest.mark.django_db
+    def test_setup_webhooks_registers_the_configured_base_url(
+        self, authenticated_client, event, monkeypatch
+    ):
+        """An instance PostFinance cannot reach under its own address can send
+        callbacks elsewhere; see webhook_url()."""
+        monkeypatch.setenv(
+            "PRETIX_POSTFINANCE_WEBHOOK_BASE_URL", "https://pretix-staging.example.org"
+        )
+        captured = {}
+
+        def fake_setup(self, webhook_url, mode):
+            captured["webhook_url"] = webhook_url
+            return True, "ok"
+
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.setup_webhooks",
+            fake_setup,
+        )
+
+        url = f"/control/event/{event.organizer.slug}/{event.slug}/postfinance/setup-webhooks/"
+        response = authenticated_client.post(url, data={"mode": "test"})
+
+        assert response.status_code == 200
+        assert (
+            captured["webhook_url"]
+            == "https://pretix-staging.example.org/_postfinance/webhook/"
+        )
