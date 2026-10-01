@@ -83,6 +83,14 @@ PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 # created, or the one an automatic charge was made against.
 TOKEN_ID_KEY = "token_id"
 
+# Key under which a plan's stored token records the payment method
+# configuration its card sits under. An automatic charge has to be restricted
+# to it: left unrestricted, PostFinance weighs every connector in the space,
+# and the presence of one that cannot take a customer-not-present charge — a
+# TWINT or a bank transfer — makes it answer "There is no payment connector
+# configured which is applicable" rather than settling on the stored card.
+METHOD_CONFIG_KEY = "payment_method_configuration_id"
+
 # Marks a payment as an automatic charge against a plan's stored token,
 # rather than one the customer made on the payment page.
 INSTALLMENT_CHARGE_KEY = "installment_charge"
@@ -1744,6 +1752,105 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 return self._get_client_for_mode("live")
         return self._get_client()
 
+    @staticmethod
+    def _method_configuration_of_transaction(
+        transaction: Any, client: PostFinanceClient
+    ) -> int | None:
+        """
+        Return the payment method configuration a transaction was processed by.
+
+        The transaction names its connector; the method configuration above it
+        takes the second lookup. Returns None rather than raising: this only
+        narrows a later charge, so failing to work it out must not take down
+        the payment that is being settled right now.
+        """
+        connector = getattr(transaction, "payment_connector_configuration", None)
+        connector_id = getattr(connector, "id", None)
+        if not connector_id:
+            return None
+        try:
+            return client.get_method_configuration_of_connector(int(connector_id))
+        except PostFinanceError as e:
+            logger.warning(
+                "Could not resolve the method configuration of connector %s: %s",
+                connector_id,
+                e,
+            )
+            return None
+
+    def _installment_method_configurations(
+        self, plan: Any, client: PostFinanceClient
+    ) -> list[int] | None:
+        """
+        Return the method configurations an automatic charge may use.
+
+        Preferably just the one the plan's token belongs to, recorded when the
+        token was stored. Plans tokenized before that was recorded work it out
+        from the interactive payment that created the token and keep the
+        answer, so they recover without the customer paying again.
+
+        Falls back to the event's allowed methods when the token's own
+        configuration cannot be established — a narrower list than nothing,
+        which is what made PostFinance reject these charges outright.
+        """
+        token_data = plan.payment_token or {}
+
+        stored = token_data.get(METHOD_CONFIG_KEY)
+        if stored:
+            return [int(stored)]
+
+        transaction_id = self._interactive_transaction_id(plan)
+        if transaction_id:
+            try:
+                transaction = client.get_transaction(transaction_id)
+            except PostFinanceError as e:
+                logger.warning(
+                    "Could not fetch transaction %s to find the method "
+                    "configuration of plan %s: %s",
+                    transaction_id,
+                    plan.pk,
+                    e,
+                )
+            else:
+                resolved = self._method_configuration_of_transaction(transaction, client)
+                if resolved:
+                    plan.store_payment_token({**token_data, METHOD_CONFIG_KEY: resolved})
+                    logger.info(
+                        "Recorded method configuration %s for installment plan %s, "
+                        "from transaction %s",
+                        resolved,
+                        plan.pk,
+                        transaction_id,
+                    )
+                    return [resolved]
+
+        logger.warning(
+            "Installment plan %s has no payment method configuration recorded; "
+            "falling back to the event's allowed methods",
+            plan.pk,
+        )
+        return self._parse_allowed_payment_methods(client.space_id)
+
+    def _interactive_transaction_id(self, plan: Any) -> int | None:
+        """
+        Return the transaction of the payment that created the plan's token.
+
+        That is the newest payment on the order that the customer made on the
+        payment page rather than an automatic charge, since a customer who
+        recovers a declined plan by paying again replaces the token.
+        """
+        payments = plan.order.payments.filter(provider__in=PROVIDER_IDENTIFIERS).order_by(
+            "-created"
+        )
+        for payment in payments:
+            info_data = payment.info_data or {}
+            if info_data.get(INSTALLMENT_CHARGE_KEY):
+                continue
+            transaction_id = info_data.get("transaction_id")
+            if transaction_id:
+                return int(transaction_id)
+        return None
+
     def store_installment_token(self, payment: OrderPayment, transaction: Any) -> None:
         """
         Record the reusable token an interactive installment payment produced.
@@ -1800,6 +1907,13 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             SPACE_ID_KEY: info_data.get(SPACE_ID_KEY)
             or self._space_id_for_payment(payment),
         }
+        # Recorded here because this transaction is the only place the token's
+        # connector is named; the automatic charges have to be restricted to it.
+        method_config = self._method_configuration_of_transaction(
+            transaction, self._get_client_for_payment(payment)
+        )
+        if method_config:
+            token_data[METHOD_CONFIG_KEY] = method_config
         token_data.update(
             {key: info_data[key] for key in FX_INFO_KEYS if info_data.get(key)}
         )
@@ -2115,8 +2229,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     plan.order.code,
                     installment_number=installment.installment_number,
                 ),
-                allowed_payment_method_configurations=self._parse_allowed_payment_methods(
-                    client.space_id
+                allowed_payment_method_configurations=self._installment_method_configurations(
+                    plan, client
                 ),
                 token=token_id,
                 customers_presence=CustomersPresence.NOT_PRESENT,

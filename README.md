@@ -235,6 +235,20 @@ the payment page, or the transaction webhook. Set up webhooks: a customer who
 closes the tab after paying otherwise leaves the plan without a token, and the
 remaining installments cannot be charged.
 
+Stored alongside the token is the payment method configuration the customer's
+card sits under, and every automatic charge is restricted to it. Without that
+restriction PostFinance weighs every connector in the space, and a space that
+also offers a method which cannot take a customer-not-present charge — TWINT,
+a bank transfer — makes it reject the charge outright:
+
+```
+There is no payment connector configured which is applicable.
+```
+
+A plan tokenized before that was recorded reads it back off the interactive
+payment's transaction on its next charge and keeps it, so existing plans
+recover without the customer paying again.
+
 Installments combine with the alternative payment currency. A plan bought in
 the alternative currency is charged in that currency for its whole life: each
 installment converts its own share at the rate that was quoted when the order

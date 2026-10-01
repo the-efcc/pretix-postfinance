@@ -39,6 +39,7 @@ from postfinancecheckout.postfinancecheckout_sdk_exception import (
     PostFinanceCheckoutSdkException,
 )
 from postfinancecheckout.service import (
+    PaymentConnectorConfigurationsService,
     PaymentMethodConfigurationsService,
     RefundsService,
     SpacesService,
@@ -183,6 +184,9 @@ class PostFinanceClient:
         self._payment_method_configs_service = PaymentMethodConfigurationsService(
             self._configuration
         )
+        self._connector_configs_service = PaymentConnectorConfigurationsService(
+            self._configuration
+        )
         self._webhook_url_service = WebhookURLsService(self._configuration)
         self._webhook_listener_service = WebhookListenersService(self._configuration)
 
@@ -242,6 +246,44 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting payment method configurations: %s", e)
             raise PostFinanceError(message=str(e)) from e
+
+    def get_method_configuration_of_connector(
+        self, connector_configuration_id: int
+    ) -> int | None:
+        """
+        Return the payment method configuration a connector configuration serves.
+
+        A transaction names the connector that processed it, but a transaction
+        can only be *restricted* to method configurations, which are one level
+        up: several connectors (Visa, Mastercard, Apple Pay) sit under one
+        method configuration. Transactions come back with the nested method
+        configuration empty, so it takes this second lookup.
+
+        Returns None if the connector configuration names no method
+        configuration.
+
+        Raises:
+            PostFinanceError: If the request fails.
+        """
+        try:
+            config = self._connector_configs_service.get_payment_connector_configurations_id(
+                space=self.space_id,
+                id=connector_configuration_id,
+            )
+        except ApiException as e:
+            logger.error("PostFinance API error getting connector configuration: %s", e)
+            raise PostFinanceError(
+                message=_format_api_exception_message(e),
+                status_code=e.status,
+                error_code=str(e.status),
+            ) from e
+        except PostFinanceCheckoutSdkException as e:
+            logger.error("PostFinance SDK error getting connector configuration: %s", e)
+            raise PostFinanceError(message=str(e)) from e
+
+        method_config = getattr(config, "payment_method_configuration", None)
+        method_config_id = getattr(method_config, "id", None)
+        return int(method_config_id) if method_config_id else None
 
     def create_transaction(
         self,

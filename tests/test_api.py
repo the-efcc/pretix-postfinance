@@ -39,6 +39,7 @@ def mock_services():
         "TokensService": MagicMock(),
         "WebhookEncryptionKeysService": MagicMock(),
         "PaymentMethodConfigurationsService": MagicMock(),
+        "PaymentConnectorConfigurationsService": MagicMock(),
         "WebhookURLsService": MagicMock(),
         "WebhookListenersService": MagicMock(),
     }
@@ -55,6 +56,11 @@ def mock_services():
             api_module,
             "PaymentMethodConfigurationsService",
             mocks["PaymentMethodConfigurationsService"],
+        ),
+        patch.object(
+            api_module,
+            "PaymentConnectorConfigurationsService",
+            mocks["PaymentConnectorConfigurationsService"],
         ),
         patch.object(api_module, "WebhookURLsService", mocks["WebhookURLsService"]),
         patch.object(api_module, "WebhookListenersService", mocks["WebhookListenersService"]),

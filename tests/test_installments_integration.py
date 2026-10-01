@@ -28,10 +28,14 @@ from pretix.base.services.installments import (
 from pretix.efcc.models import InstallmentPlan, ScheduledInstallment
 
 from pretix_postfinance.api import PostFinanceError
-from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.payment import METHOD_CONFIG_KEY, PostFinancePaymentProvider
 from pretix_postfinance.views import _process_transaction_webhook
 
 TOKEN_ID = 999888
+# The connector that processes the interactive payment, and the method
+# configuration above it that the later token charges must be restricted to.
+CONNECTOR_ID = 116916
+METHOD_CONFIG_ID = 80778
 
 
 @pytest.fixture
@@ -71,7 +75,7 @@ def fulfilled_transaction(with_token=True):
     return SimpleNamespace(
         id=123456,
         state=TransactionState.FULFILL,
-        payment_connector_configuration=SimpleNamespace(name="TWINT"),
+        payment_connector_configuration=SimpleNamespace(name="Visa", id=CONNECTOR_ID),
         created_on="2026-01-13T10:00:00Z",
         token=token,
     )
@@ -108,6 +112,13 @@ def postfinance(monkeypatch):
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.get_transaction",
         lambda self, tid: api.transaction,
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient."
+        "get_method_configuration_of_connector",
+        lambda self, connector_id: (
+            METHOD_CONFIG_ID if connector_id == CONNECTOR_ID else None
+        ),
     )
     def process_with_token(self, tid):
         if api.lose_response:
@@ -237,6 +248,9 @@ def test_full_plan_lifecycle_in_event_currency(
     plan.refresh_from_db()
     assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
     assert plan.payment_token["token_id"] == TOKEN_ID
+    # The connector that took the interactive payment is what the automatic
+    # charges have to be aimed at, so it is recorded with the token.
+    assert plan.payment_token[METHOD_CONFIG_KEY] == METHOD_CONFIG_ID
     assert plan.installments_paid == 1
     assert plan.installments.get(installment_number=1).state == (
         ScheduledInstallment.STATE_PAID
@@ -256,6 +270,10 @@ def test_full_plan_lifecycle_in_event_currency(
         100.00,
     ]
     assert all(c["token"] == TOKEN_ID for c in postfinance.token_charges())
+    assert all(
+        c["allowed_payment_method_configurations"] == [METHOD_CONFIG_ID]
+        for c in postfinance.token_charges()
+    )
 
     plan.refresh_from_db()
     assert plan.status == InstallmentPlan.STATUS_COMPLETED
