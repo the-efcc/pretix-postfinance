@@ -236,18 +236,17 @@ closes the tab after paying otherwise leaves the plan without a token, and the
 remaining installments cannot be charged.
 
 Stored alongside the token is the payment method configuration the customer's
-card sits under, and every automatic charge is restricted to it. Without that
-restriction PostFinance weighs every connector in the space, and a space that
-also offers a method which cannot take a customer-not-present charge — TWINT,
-a bank transfer — makes it reject the charge outright:
-
-```
-There is no payment connector configured which is applicable.
-```
+card sits under, and every automatic charge is restricted to it. The **Allowed
+payment methods** setting describes what a customer may pick at checkout; an
+automatic charge has no choice to make, and only the connector that created
+the token can serve it. Restricting the charge also stops an event that offers
+TWINT at checkout from narrowing its own installment charges to a method its
+token cannot use.
 
 A plan tokenized before that was recorded reads it back off the interactive
 payment's transaction on its next charge and keeps it, so existing plans
-recover without the customer paying again.
+recover without the customer paying again. Where it cannot be established the
+charge falls back to the event's allowed methods.
 
 Installments combine with the alternative payment currency. A plan bought in
 the alternative currency is charged in that currency for its whole life: each

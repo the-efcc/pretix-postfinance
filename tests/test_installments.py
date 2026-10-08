@@ -154,8 +154,7 @@ def test_execute_installment_restricts_to_allowed_payment_methods(
     A token charge is limited to the same connectors as the first payment.
 
     This is the fallback for a plan whose own method configuration cannot be
-    established; a narrower list than nothing, which is what makes PostFinance
-    answer "There is no payment connector configured which is applicable."
+    established, which is narrower than sending nothing at all.
     """
     chf_event.settings.set("payment_postfinance_allowed_payment_methods", ["111", "222"])
     chf_event.settings.set("payment_postfinance_allowed_payment_methods_space", "12345")

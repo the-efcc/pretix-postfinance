@@ -85,11 +85,12 @@ PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 TOKEN_ID_KEY = "token_id"
 
 # Key under which a plan's stored token records the payment method
-# configuration its card sits under. An automatic charge has to be restricted
-# to it: left unrestricted, PostFinance weighs every connector in the space,
-# and the presence of one that cannot take a customer-not-present charge — a
-# TWINT or a bank transfer — makes it answer "There is no payment connector
-# configured which is applicable" rather than settling on the stored card.
+# configuration its card sits under. An automatic charge is restricted to it
+# because that is what the charge means: the event's allowed methods say what
+# a customer may pick at checkout, while a charge against a stored token has
+# no choice to make and only the connector that created the token can serve
+# it. It also stops an event that offers TWINT at checkout from narrowing its
+# own installment charges to a method its token cannot use.
 METHOD_CONFIG_KEY = "payment_method_configuration_id"
 
 # Marks a payment as an automatic charge against a plan's stored token,
@@ -1796,8 +1797,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         answer, so they recover without the customer paying again.
 
         Falls back to the event's allowed methods when the token's own
-        configuration cannot be established — a narrower list than nothing,
-        which is what made PostFinance reject these charges outright.
+        configuration cannot be established, which is narrower than sending
+        nothing at all.
         """
         token_data = plan.payment_token or {}
 
