@@ -36,6 +36,8 @@ from .payment import (
     PROVIDER_IDENTIFIERS,
     SPACE_ID_KEY,
     SUCCESS_STATES,
+    mark_payment_pending,
+    merge_payment_info,
     webhook_url,
 )
 
@@ -494,11 +496,12 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     if transaction.payment_connector_configuration:
         payment_method = transaction.payment_connector_configuration.name
 
-    info_data = payment.info_data or {}
-    # The transaction is now known by its final key, so the provisional one
-    # recorded when the customer was sent to the payment page is redundant.
-    info_data.pop(PENDING_TRANSACTION_ID_KEY, None)
-    info_data.update(
+    # The payment was loaded before the API call above, and the other webhooks
+    # PostFinance sends for this transaction may have written to it since, so
+    # the keys are merged into the stored row rather than saved over it. This
+    # also re-reads the payment's state for the checks below.
+    info_data = merge_payment_info(
+        payment,
         {
             "transaction_id": entity_id,
             # Record the space for payments predating it, so later webhooks
@@ -506,10 +509,12 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
             SPACE_ID_KEY: space_id,
             "state": transaction_state.value if transaction_state else None,
             "payment_method": payment_method,
-        }
+        },
+        # The transaction is now known by its final key, so the provisional
+        # one recorded when the customer was sent to the payment page is
+        # redundant.
+        remove=(PENDING_TRANSACTION_ID_KEY,),
     )
-    payment.info_data = info_data
-    payment.save(update_fields=["info"])
 
     payment.order.log_action(
         "pretix_postfinance.webhook",
@@ -573,10 +578,10 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
             logger.exception("PostFinance webhook: error failing payment %s: %s", payment.pk, e)
             return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
 
-    # Handle pending/intermediate states
-    if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
-        payment.state = OrderPayment.PAYMENT_STATE_PENDING
-        payment.save(update_fields=["state"])
+    # Handle pending/intermediate states. Conditional on the stored state, not
+    # the loaded one: a concurrent webhook may have confirmed the payment
+    # since, and must not have it put back to pending.
+    if mark_payment_pending(payment):
         logger.info("PostFinance webhook: payment %s set to pending", payment.pk)
         return (WEBHOOK_STATUS_OK, True)
 

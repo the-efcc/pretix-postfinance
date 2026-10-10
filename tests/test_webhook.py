@@ -1274,6 +1274,154 @@ class TestWebhookFailurePreservesInfo:
 
 
 
+class TestWebhookConcurrentWrites:
+    """
+    PostFinance sends several webhooks for one transaction within seconds —
+    CONFIRMED, PROCESSING and a few FULFILLs for a single order — and they can
+    be handled concurrently. A handler that loaded the payment before its API
+    call must not write that stale copy back over what another handler stored
+    in the meantime.
+
+    The interleaving is simulated by having "the other webhook" store a token
+    and confirm the payment, through its own copy of the row, from inside the
+    patched calls this handler makes.
+    """
+
+    @staticmethod
+    def _other_webhook_confirms(payment_pk: int) -> None:
+        with scopes_disabled():
+            other = OrderPayment.objects.get(pk=payment_pk)
+            other.info_data = {**other.info_data, "token_id": "tok-other"}
+            other.save(update_fields=["info"])
+            other.confirm()
+
+    @staticmethod
+    def _processing_transaction() -> MagicMock:
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.PROCESSING
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "Visa"
+        return mock_transaction
+
+    @staticmethod
+    def _created_payment(order: Order) -> OrderPayment:
+        with scopes_disabled():
+            return order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 123456, "space_id": 12345}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+    def _post(self, client) -> None:
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="PROCESSING")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.django_db
+    def test_confirmed_while_fetching_the_transaction(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The payment is confirmed while this handler waits on PostFinance.
+
+        Saving the copy loaded before the call dropped the token the other
+        webhook stored, and the copy's `created` state then sent the confirmed
+        payment back to pending while the order stayed paid.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+
+        def get_transaction(self, tid):
+            TestWebhookConcurrentWrites._other_webhook_confirms(payment.pk)
+            return mock_transaction
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction", get_transaction
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        order.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert order.status == Order.STATUS_PAID
+        assert payment.info_data["token_id"] == "tok-other"
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["state"] == "PROCESSING"
+        assert payment.info_data["payment_method"] == "Visa"
+        assert "pending_transaction_id" not in payment.info_data
+
+    @pytest.mark.django_db
+    def test_confirmed_while_storing_the_token(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The payment is confirmed after this handler wrote its info.
+
+        The handler's copy still reads `created` here, so only a transition
+        conditional on the stored state keeps it from being reverted to
+        pending.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.store_installment_token",
+            lambda self, p, transaction: TestWebhookConcurrentWrites._other_webhook_confirms(
+                p.pk
+            ),
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        order.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert order.status == Order.STATUS_PAID
+        assert payment.info_data["token_id"] == "tok-other"
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["state"] == "PROCESSING"
+
+    @pytest.mark.django_db
+    def test_created_payment_still_moves_to_pending(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """Without a concurrent confirmation the transition still happens."""
+        event, order = webhook_env
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        assert payment.state == OrderPayment.PAYMENT_STATE_PENDING
+        assert payment.info_data["transaction_id"] == 123456
+
+
 class TestWebhookSpaceLookup:
     """
     Signature validation needs credentials for the space a webhook came from,

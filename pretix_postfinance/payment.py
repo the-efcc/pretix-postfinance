@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Iterable
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse, urlunparse
@@ -10,6 +11,7 @@ from django import forms
 from django.conf import settings as django_settings
 from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import transaction as db_transaction
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -31,6 +33,7 @@ from pretix.base.models import OrderPayment, OrderRefund
 from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.settings import SettingsSandbox
 from pretix.base.templatetags.money import money_filter
+from pretix.helpers.database import OF_SELF
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
@@ -188,6 +191,61 @@ def webhook_url() -> str:
         return urlunparse(built)
 
     return urlunparse(built._replace(scheme=override.scheme, netloc=override.netloc))
+
+
+def merge_payment_info(
+    payment: OrderPayment,
+    updates: dict[str, Any],
+    remove: Iterable[str] = (),
+) -> dict[str, Any]:
+    """
+    Write keys into a payment's info_data without losing anyone else's.
+
+    PostFinance sends several webhooks for one transaction within seconds,
+    and the customer returning from the payment page reads the same
+    transaction again, so more than one request can be holding the same
+    payment at once. Saving the info that was loaded before an API call
+    would overwrite whatever another request wrote in the meantime — an
+    installment token, say. The merge is therefore applied to the row as it
+    stands under a lock, which is held only for the merge: never across a
+    call to PostFinance.
+
+    The in-memory payment is brought up to date with the locked row, state
+    included, so the caller decides what to do next on what is actually
+    stored rather than on what it loaded.
+
+    :returns: The info_data now stored on the payment.
+    """
+    with db_transaction.atomic():
+        locked = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
+        info_data = locked.info_data or {}
+        for key in remove:
+            info_data.pop(key, None)
+        info_data.update(updates)
+        locked.info_data = info_data
+        locked.save(update_fields=["info"])
+
+    payment.info = locked.info
+    cast(Any, payment).state = locked.state
+    return info_data
+
+
+def mark_payment_pending(payment: OrderPayment) -> bool:
+    """
+    Move a payment from created to pending, if it is still created.
+
+    A conditional update rather than a save of the loaded state: a webhook
+    for an intermediate state that read the payment as created must not put
+    it back to pending after a concurrent webhook has confirmed it.
+
+    :returns: Whether the payment was moved.
+    """
+    moved = OrderPayment.objects.filter(
+        pk=payment.pk, state=OrderPayment.PAYMENT_STATE_CREATED
+    ).update(state=OrderPayment.PAYMENT_STATE_PENDING)
+    if moved:
+        cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
+    return bool(moved)
 
 
 def _line_item_type(amount: Decimal, positive_type: LineItemType) -> LineItemType:
@@ -1604,9 +1662,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment_method = transaction.payment_connector_configuration.name
 
             state = transaction.state
-            info_data = payment.info_data or {}
-            info_data.pop(PENDING_TRANSACTION_ID_KEY, None)
-            info_data.update(
+            # Also re-reads the payment's state: a webhook may have processed
+            # the transaction first.
+            info_data = merge_payment_info(
+                payment,
                 {
                     "transaction_id": transaction_id,
                     SPACE_ID_KEY: client.space_id,
@@ -1615,10 +1674,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "created_on": str(transaction.created_on)
                     if transaction.created_on
                     else None,
-                }
+                },
+                remove=(PENDING_TRANSACTION_ID_KEY,),
             )
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
 
             logger.info(
                 "PostFinance transaction %s has state %s for payment %s",
@@ -1626,9 +1684,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 state,
                 payment.pk,
             )
-
-            # Check if already confirmed (webhook may have processed first)
-            payment.refresh_from_db()
 
             # A plan's first payment leaves behind the token every later
             # installment is charged against. The token exists from the moment
@@ -1677,10 +1732,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     state,
                 )
             else:
-                payment.refresh_from_db()
-                if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
-                    cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
-                    payment.save(update_fields=["state"])
+                mark_payment_pending(payment)
                 logger.info(
                     "Payment %s is pending (PostFinance state: %s)",
                     payment.pk,
@@ -1689,19 +1741,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         except PostFinanceError as e:
             logger.exception("PostFinance API error during execute_payment: %s", e)
-            payment.info_data = {
-                **{
-                    k: v
-                    for k, v in (payment.info_data or {}).items()
-                    if k != PENDING_TRANSACTION_ID_KEY
+            merge_payment_info(
+                payment,
+                {
+                    "transaction_id": transaction_id,
+                    SPACE_ID_KEY: self._space_id_for_payment(payment),
+                    "error": str(e),
+                    "error_code": e.error_code,
+                    "error_status_code": e.status_code,
                 },
-                "transaction_id": transaction_id,
-                SPACE_ID_KEY: self._space_id_for_payment(payment),
-                "error": str(e),
-                "error_code": e.error_code,
-                "error_status_code": e.status_code,
-            }
-            payment.save(update_fields=["info"])
+                remove=(PENDING_TRANSACTION_ID_KEY,),
+            )
             user_message = _("Payment processing failed. Please try again.")
             if e.status_code and e.status_code in ERROR_STATUS_MESSAGES:
                 user_message = ERROR_STATUS_MESSAGES[e.status_code]
@@ -1709,18 +1759,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         except Exception as e:
             logger.exception("Unexpected error during execute_payment: %s", e)
-            payment.info_data = {
-                **{
-                    k: v
-                    for k, v in (payment.info_data or {}).items()
-                    if k != PENDING_TRANSACTION_ID_KEY
+            merge_payment_info(
+                payment,
+                {
+                    "transaction_id": transaction_id,
+                    SPACE_ID_KEY: self._space_id_for_payment(payment),
+                    "error": str(e),
+                    "error_code": type(e).__name__,
                 },
-                "transaction_id": transaction_id,
-                SPACE_ID_KEY: self._space_id_for_payment(payment),
-                "error": str(e),
-                "error_code": type(e).__name__,
-            }
-            payment.save(update_fields=["info"])
+                remove=(PENDING_TRANSACTION_ID_KEY,),
+            )
             raise PaymentException(
                 str(_("An unexpected error occurred. Please try again."))
             ) from e
@@ -1826,9 +1874,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         token_data.pop("charged_amount", None)
         plan.store_payment_token(token_data)
 
-        info_data[TOKEN_ID_KEY] = token_id
-        payment.info_data = info_data
-        payment.save(update_fields=["info"])
+        merge_payment_info(payment, {TOKEN_ID_KEY: token_id})
 
         logger.info(
             "Stored payment token %s for installment plan %s",
