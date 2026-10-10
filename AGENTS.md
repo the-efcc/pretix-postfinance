@@ -9,7 +9,7 @@ PostFinance Checkout payment plugin for pretix.
 ## Key Files
 
 - **`pretix_postfinance/payment.py`**: Main payment provider (BasePaymentProvider subclass)
-- **`pretix_postfinance/views.py`**: Admin views for capture/refund + webhook handler
+- **`pretix_postfinance/views.py`**: Admin views for capture/refund, webhook handler, and the pages PostFinance sends the customer back to
 - **`pretix_postfinance/api.py`**: PostFinance Checkout SDK wrapper
 - **`pretix_postfinance/_types.py`**: Type definitions for pretix-specific types
 - **`pretix_postfinance/locale/`**: Message catalogs (de, fr, it, es)
@@ -21,8 +21,12 @@ PostFinance Checkout payment plugin for pretix.
 1. User initiates payment -> `payment_form_render()`
 2. Payment created via PostFinance API -> transaction ID stored in `info_data`
 3. User redirected to PostFinance checkout
-4. Webhook receives transaction state updates -> `_process_transaction_state()`
+4. Webhook receives transaction state updates -> `_process_transaction_webhook()`
 5. Payment marked as confirmed/failed in pretix
+6. User sent back to `PostFinanceReturnView` (`postfinance/return/` or
+   `postfinance/failed/`), which calls `sync_payment()`. Not pretix's
+   `pay.complete`/`pay`: those reject any payment no longer `created`, and the
+   webhook in step 4 usually gets there before the customer does.
 
 ### Refund Flow
 1. Admin initiates refund -> `PostFinanceRefundView`

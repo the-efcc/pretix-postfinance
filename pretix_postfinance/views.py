@@ -12,15 +12,23 @@ import logging
 from collections.abc import Callable, Iterator
 from typing import Any, Literal
 
+from django.contrib import messages
+from django.core.exceptions import ObjectDoesNotExist
 from django.db.models import Q, QuerySet
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
+from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 from django.views import View
+from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django_scopes import scopes_disabled
-from pretix.base.models import Event, OrderPayment, OrderRefund
+from pretix.base.models import Event, Order, OrderPayment, OrderRefund
+from pretix.base.payment import PaymentException
 from pretix.base.permissions import AnyPermissionOf
 from pretix.control.permissions import EventPermissionRequiredMixin
+from pretix.helpers.http import redirect_to_url
+from pretix.multidomain.urlreverse import eventreverse
 
 from ._types import PretixHttpRequest
 from .api import (
@@ -34,6 +42,7 @@ from .payment import (
     PENDING_TRANSACTION_ID_KEY,
     PROD_PROVIDER_IDENTIFIER,
     PROVIDER_IDENTIFIERS,
+    RETURN_URL_TAG,
     SPACE_ID_KEY,
     SUCCESS_STATES,
     mark_payment_pending,
@@ -681,6 +690,103 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
         return (WEBHOOK_STATUS_OK, True)
 
     return (WEBHOOK_STATUS_OK, False)
+
+
+@method_decorator(xframe_options_exempt, "dispatch")
+class PostFinanceReturnView(View):
+    """
+    Where PostFinance sends the customer back to from the payment page.
+
+    pretix's own `pay.complete` and `pay` pages only accept a payment that is
+    still `created`. PostFinance announces a transaction by webhook as soon as
+    the customer submits it, usually before their browser is back, and the
+    webhook moves the payment to `pending` or confirms it outright — so a
+    customer sent to those pages was told "The payment for this order cannot
+    be continued" for a payment that was going through. This page takes the
+    payment in whatever state it is in.
+
+    `failed` is set on the URL PostFinance uses when the transaction did not
+    go through.
+    """
+
+    failed = False
+
+    def dispatch(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        self.event = request.event
+        try:
+            self.order = Order.objects.filter(event=self.event).get_with_secret_check(
+                code=kwargs["order"],
+                received_secret=kwargs["hash"].lower(),
+                tag=RETURN_URL_TAG,
+            )
+        except ObjectDoesNotExist:
+            raise Http404() from None
+        self.payment = get_object_or_404(
+            self.order.payments,
+            pk=kwargs["payment"],
+            provider__in=PROVIDER_IDENTIFIERS,
+        )
+        return super().dispatch(request, *args, **kwargs)
+
+    def _order_url(self, query: str = "") -> str:
+        return eventreverse(
+            self.event,
+            "presale:event.order",
+            kwargs={"order": self.order.code, "secret": self.order.secret},
+        ) + query
+
+    def get(self, request: PretixHttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        payment = self.payment
+
+        if self.failed and payment.state == OrderPayment.PAYMENT_STATE_CREATED:
+            # No webhook has moved the payment on: the customer cancelled or
+            # was declined before the transaction got anywhere. The same
+            # payment can simply be tried again, with a new transaction.
+            return redirect_to_url(
+                eventreverse(
+                    self.event,
+                    "presale:event.order.pay",
+                    kwargs={
+                        "order": self.order.code,
+                        "secret": self.order.secret,
+                        "payment": payment.pk,
+                    },
+                )
+            )
+
+        if payment.state in (
+            OrderPayment.PAYMENT_STATE_CREATED,
+            OrderPayment.PAYMENT_STATE_PENDING,
+        ):
+            # Webhooks may lag behind the customer, so ask PostFinance rather
+            # than show them a state that is already out of date.
+            provider = payment.payment_provider
+            try:
+                if provider is not None:
+                    provider.sync_payment(request, payment)
+            except PaymentException as e:
+                messages.error(request, str(e))
+                return redirect_to_url(self._order_url())
+            payment.refresh_from_db()
+            self.order.refresh_from_db()
+
+        if self.order.status == Order.STATUS_PAID:
+            return redirect_to_url(self._order_url("?paid=yes"))
+
+        if self.failed or payment.state in (
+            OrderPayment.PAYMENT_STATE_FAILED,
+            OrderPayment.PAYMENT_STATE_CANCELED,
+        ):
+            messages.error(
+                request,
+                _(
+                    "Your payment was not completed. You can try again or "
+                    "choose another payment method."
+                ),
+            )
+            return redirect_to_url(self._order_url())
+
+        return redirect_to_url(self._order_url("?thanks=yes"))
 
 
 class PostFinanceTestConnectionView(EventPermissionRequiredMixin, View):
