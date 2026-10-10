@@ -79,6 +79,10 @@ ERROR_STATUS_MESSAGES = {
 
 PENDING_TRANSACTION_ID_KEY = "pending_transaction_id"
 
+# Tag the order secret is derived with in the URLs PostFinance sends the
+# customer back to, so those URLs carry no secret usable on any other page.
+RETURN_URL_TAG = "plugins:pretix_postfinance"
+
 # Key under which the ID of the reusable PostFinance token a payment is
 # associated with is recorded: the token an interactive installment payment
 # created, or the one an automatic charge was made against.
@@ -1316,23 +1320,20 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment.pk,
             )
 
+        # The plugin's own pages rather than pretix's `pay.complete` and
+        # `pay`: those only accept a payment still in `created`, and a webhook
+        # usually moves it on before the customer is back — they would be met
+        # with "The payment for this order cannot be continued".
+        return_kwargs = {
+            "order": payment.order.code,
+            "hash": payment.order.tagged_secret(RETURN_URL_TAG),
+            "payment": payment.pk,
+        }
         success_url = build_absolute_uri(
-            self.event,
-            "presale:event.order.pay.complete",
-            kwargs={
-                "order": payment.order.code,
-                "secret": payment.order.secret,
-                "payment": payment.pk,
-            },
+            self.event, "plugins:pretix_postfinance:return", kwargs=return_kwargs
         )
         failed_url = build_absolute_uri(
-            self.event,
-            "presale:event.order.pay",
-            kwargs={
-                "order": payment.order.code,
-                "secret": payment.order.secret,
-                "payment": payment.pk,
-            },
+            self.event, "plugins:pretix_postfinance:failed", kwargs=return_kwargs
         )
 
         transaction = client.create_transaction(
@@ -1595,6 +1596,27 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     str(_("An unexpected error occurred. Please try again."))
                 ) from e
 
+        self._sync_payment(request, payment, transaction_id)
+        return None
+
+    def sync_payment(self, request: HttpRequest, payment: OrderPayment) -> None:
+        """
+        Bring a payment up to date with its transaction, if it has one.
+
+        Used when PostFinance sends the customer back. Unlike
+        `execute_payment()` this never creates a transaction: a payment
+        without one has nothing to catch up on.
+        """
+        transaction_id = self._get_payment_transaction_id(payment)
+        if transaction_id is not None:
+            self._sync_payment(request, payment, transaction_id)
+
+    def _sync_payment(
+        self, request: HttpRequest, payment: OrderPayment, transaction_id: int
+    ) -> None:
+        """
+        Fetch a transaction and confirm, fail or mark pending its payment.
+        """
         try:
             client = self._get_client_for_payment(payment)
             transaction = client.get_transaction(transaction_id)
@@ -1728,8 +1750,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         finally:
             # Always clean up session, whether success or failure
             self._clear_session_transaction_id(request)
-
-        return None
 
     def _installment_token_client(self, plan: Any) -> PostFinanceClient:
         """
