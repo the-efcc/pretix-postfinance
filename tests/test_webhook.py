@@ -1274,6 +1274,362 @@ class TestWebhookFailurePreservesInfo:
 
 
 
+class TestWebhookConcurrentWrites:
+    """
+    PostFinance sends several webhooks for one transaction within seconds —
+    CONFIRMED, PROCESSING and a few FULFILLs for a single order — and they can
+    be handled concurrently. A handler that loaded the payment before its API
+    call must not write that stale copy back over what another handler stored
+    in the meantime.
+
+    The interleaving is simulated by having "the other webhook" store a token
+    and confirm the payment, through its own copy of the row, from inside the
+    patched calls this handler makes.
+    """
+
+    @staticmethod
+    def _other_webhook_confirms(payment_pk: int) -> None:
+        with scopes_disabled():
+            other = OrderPayment.objects.get(pk=payment_pk)
+            other.info_data = {**other.info_data, "token_id": "tok-other"}
+            other.save(update_fields=["info"])
+            other.confirm()
+
+    @staticmethod
+    def _processing_transaction() -> MagicMock:
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.PROCESSING
+        mock_transaction.payment_connector_configuration = MagicMock()
+        mock_transaction.payment_connector_configuration.name = "Visa"
+        return mock_transaction
+
+    @staticmethod
+    def _created_payment(order: Order) -> OrderPayment:
+        with scopes_disabled():
+            return order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"pending_transaction_id": 123456, "space_id": 12345}),
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+            )
+
+    def _post(self, client) -> None:
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456, state="PROCESSING")),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.django_db
+    def test_confirmed_while_fetching_the_transaction(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The payment is confirmed while this handler waits on PostFinance.
+
+        Saving the copy loaded before the call dropped the token the other
+        webhook stored, and the copy's `created` state then sent the confirmed
+        payment back to pending while the order stayed paid.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+
+        def get_transaction(self, tid):
+            TestWebhookConcurrentWrites._other_webhook_confirms(payment.pk)
+            return mock_transaction
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction", get_transaction
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        order.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert order.status == Order.STATUS_PAID
+        assert payment.info_data["token_id"] == "tok-other"
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["state"] == "PROCESSING"
+        assert payment.info_data["payment_method"] == "Visa"
+        assert "pending_transaction_id" not in payment.info_data
+
+    @pytest.mark.django_db
+    def test_confirmed_while_storing_the_token(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        The payment is confirmed after this handler wrote its info.
+
+        The handler's copy still reads `created` here, so only a transition
+        conditional on the stored state keeps it from being reverted to
+        pending.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+        monkeypatch.setattr(
+            "pretix_postfinance.payment.PostFinancePaymentProvider.store_installment_token",
+            lambda self, p, transaction: TestWebhookConcurrentWrites._other_webhook_confirms(
+                p.pk
+            ),
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        order.refresh_from_db()
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert order.status == Order.STATUS_PAID
+        assert payment.info_data["token_id"] == "tok-other"
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["state"] == "PROCESSING"
+
+    @pytest.mark.django_db
+    def test_created_payment_still_moves_to_pending(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """Without a concurrent confirmation the transition still happens."""
+        event, order = webhook_env
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        assert payment.state == OrderPayment.PAYMENT_STATE_PENDING
+        assert payment.info_data["transaction_id"] == 123456
+
+    @pytest.mark.django_db
+    def test_an_older_state_fetched_late_does_not_overwrite_a_newer_one(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        This handler fetched PROCESSING, then the FULFILL handler stored its
+        state and confirmed the payment before this one got to write.
+
+        Writing PROCESSING over FULFILL left a paid order whose payment
+        `payment_refund_supported()` rejects.
+        """
+        event, order = webhook_env
+        order.status = Order.STATUS_PENDING
+        order.save()
+        payment = self._created_payment(order)
+        mock_transaction = self._processing_transaction()
+        mock_transaction.payment_connector_configuration = None
+
+        def get_transaction(self, tid):
+            with scopes_disabled():
+                other = OrderPayment.objects.get(pk=payment.pk)
+                other.info_data = {
+                    **other.info_data,
+                    "transaction_id": 123456,
+                    "state": "FULFILL",
+                    "payment_method": "Visa",
+                }
+                other.save(update_fields=["info"])
+                other.confirm()
+            return mock_transaction
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction", get_transaction
+        )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+            assert payment.payment_provider.payment_refund_supported(payment)
+
+        assert payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
+        assert payment.info_data["state"] == "FULFILL"
+        assert payment.info_data["payment_method"] == "Visa"
+        assert payment.info_data["transaction_id"] == 123456
+        assert "pending_transaction_id" not in payment.info_data
+
+    @pytest.mark.django_db
+    def test_a_new_transaction_starts_its_states_over(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        A retry on the same payment records the new transaction's state, even
+        though the previous transaction had got further.
+        """
+        event, order = webhook_env
+        mock_transaction = MagicMock()
+        mock_transaction.state = TransactionState.PENDING
+        mock_transaction.payment_connector_configuration = None
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_transaction",
+            lambda self, tid: mock_transaction,
+        )
+
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps(
+                    {
+                        "transaction_id": 111111,
+                        "state": "AUTHORIZED",
+                        "space_id": 12345,
+                        "pending_transaction_id": 123456,
+                    }
+                ),
+                state=OrderPayment.PAYMENT_STATE_PENDING,
+            )
+
+        self._post(client)
+
+        with scopes_disabled():
+            payment.refresh_from_db()
+        assert payment.info_data["transaction_id"] == 123456
+        assert payment.info_data["state"] == "PENDING"
+
+    @staticmethod
+    def _refund_in_transit(order: Order) -> OrderRefund:
+        with scopes_disabled():
+            payment = order.payments.create(
+                provider="postfinance",
+                amount=order.total,
+                info=json.dumps({"transaction_id": 123456, "state": "FULFILL"}),
+                state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+            )
+            return order.refunds.create(
+                provider="postfinance",
+                amount=order.total,
+                payment=payment,
+                state=OrderRefund.REFUND_STATE_TRANSIT,
+                info=json.dumps({"refund_id": 789012, "space_id": 12345}),
+            )
+
+    @staticmethod
+    def _other_webhook_completes_refund(refund_pk: int) -> None:
+        with scopes_disabled():
+            other = OrderRefund.objects.get(pk=refund_pk)
+            other.info_data = {
+                **other.info_data,
+                "state": "SUCCESSFUL",
+                "note": "from the other webhook",
+            }
+            other.save(update_fields=["info"])
+            other.done()
+
+    @staticmethod
+    def _post_refund(client) -> None:
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(789012)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.django_db
+    def test_a_refund_completed_concurrently_is_done_once(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        Two SUCCESSFUL webhooks for one refund each used to run pretix's
+        unlocked `done()`, logging the refund done twice, and the second one's
+        full save wrote back the info it had loaded.
+        """
+        event, order = webhook_env
+        refund = self._refund_in_transit(order)
+        mock_refund = MagicMock()
+        mock_refund.state.value = "SUCCESSFUL"
+
+        def get_refund(self, rid):
+            TestWebhookConcurrentWrites._other_webhook_completes_refund(refund.pk)
+            return mock_refund
+
+        monkeypatch.setattr("pretix_postfinance.views.PostFinanceClient.get_refund", get_refund)
+
+        self._post_refund(client)
+
+        with scopes_disabled():
+            refund.refresh_from_db()
+            done_logs = order.all_logentries().filter(
+                action_type="pretix.event.order.refund.done"
+            )
+            assert done_logs.count() == 1
+        assert refund.state == OrderRefund.REFUND_STATE_DONE
+        assert refund.info_data["note"] == "from the other webhook"
+        assert refund.info_data["state"] == "SUCCESSFUL"
+
+    @pytest.mark.django_db
+    def test_an_older_refund_state_fetched_late_does_not_overwrite_a_newer_one(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        event, order = webhook_env
+        refund = self._refund_in_transit(order)
+        mock_refund = MagicMock()
+        mock_refund.state.value = "PENDING"
+
+        def get_refund(self, rid):
+            TestWebhookConcurrentWrites._other_webhook_completes_refund(refund.pk)
+            return mock_refund
+
+        monkeypatch.setattr("pretix_postfinance.views.PostFinanceClient.get_refund", get_refund)
+
+        self._post_refund(client)
+
+        with scopes_disabled():
+            refund.refresh_from_db()
+        assert refund.state == OrderRefund.REFUND_STATE_DONE
+        assert refund.info_data["state"] == "SUCCESSFUL"
+        assert refund.info_data["note"] == "from the other webhook"
+
+    @pytest.mark.django_db
+    def test_a_completed_refund_is_not_marked_failed(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        """
+        This handler loaded the refund in transit; another webhook completed
+        it before this one acted on a FAILED fetch.
+        """
+        event, order = webhook_env
+        refund = self._refund_in_transit(order)
+        mock_refund = MagicMock()
+        mock_refund.state.value = "FAILED"
+
+        def get_refund(self, rid):
+            TestWebhookConcurrentWrites._other_webhook_completes_refund(refund.pk)
+            return mock_refund
+
+        monkeypatch.setattr("pretix_postfinance.views.PostFinanceClient.get_refund", get_refund)
+
+        self._post_refund(client)
+
+        with scopes_disabled():
+            refund.refresh_from_db()
+            failed_logs = order.all_logentries().filter(
+                action_type="pretix.event.order.refund.failed"
+            )
+            assert failed_logs.count() == 0
+        assert refund.state == OrderRefund.REFUND_STATE_DONE
+
 class TestWebhookSpaceLookup:
     """
     Signature validation needs credentials for the space a webhook came from,

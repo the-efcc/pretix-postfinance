@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from collections.abc import Iterable
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlparse, urlunparse
@@ -10,6 +11,7 @@ from django import forms
 from django.conf import settings as django_settings
 from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.db import transaction as db_transaction
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -23,6 +25,7 @@ from postfinancecheckout.models import (
     CustomersPresence,
     LineItemCreate,
     LineItemType,
+    RefundState,
     TokenizationMode,
     TransactionState,
 )
@@ -31,6 +34,7 @@ from pretix.base.models import OrderPayment, OrderRefund
 from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.settings import SettingsSandbox
 from pretix.base.templatetags.money import money_filter
+from pretix.helpers.database import OF_SELF
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
 
@@ -192,6 +196,208 @@ def webhook_url() -> str:
         return urlunparse(built)
 
     return urlunparse(built._replace(scheme=override.scheme, netloc=override.netloc))
+
+
+# Where each state comes in a transaction's lifecycle at PostFinance, so a
+# state fetched before another can be recognised as the older of the two. The
+# terminal states share the last rank: a transaction reaches only one of them.
+TRANSACTION_STATE_ORDER = {
+    TransactionState.CREATE.value: 0,
+    TransactionState.PENDING.value: 1,
+    TransactionState.CONFIRMED.value: 2,
+    TransactionState.PROCESSING.value: 3,
+    TransactionState.AUTHORIZED.value: 4,
+    TransactionState.COMPLETED.value: 5,
+    TransactionState.FAILED.value: 6,
+    TransactionState.VOIDED.value: 6,
+    TransactionState.DECLINE.value: 6,
+    TransactionState.FULFILL.value: 6,
+}
+
+# The same for a refund.
+REFUND_STATE_ORDER = {
+    RefundState.CREATE.value: 0,
+    RefundState.SCHEDULED.value: 1,
+    RefundState.PENDING.value: 2,
+    RefundState.MANUAL_CHECK.value: 3,
+    RefundState.FAILED.value: 4,
+    RefundState.SUCCESSFUL.value: 4,
+}
+
+# info_data keys describing a transaction as it was when fetched. They are
+# written together and held back together when the fetch turns out to be older
+# than what is already stored.
+TRANSACTION_SNAPSHOT_KEYS = ("state", "payment_method", "created_on")
+
+
+def _state_is_behind(
+    stored: dict[str, Any],
+    updates: dict[str, Any],
+    id_key: str,
+    state_order: dict[str, int],
+) -> bool:
+    """
+    Whether ``updates`` carries an older state of the entity than ``stored``.
+
+    Only states of the same entity are compared: a payment retried with a new
+    transaction starts that transaction's lifecycle over. An unknown state on
+    either side is never treated as older.
+    """
+    if "state" not in updates:
+        return False
+    if id_key in updates and str(updates[id_key]) != str(stored.get(id_key)):
+        return False
+    new_state = updates["state"]
+    stored_state = stored.get("state")
+    if not isinstance(new_state, str) or not isinstance(stored_state, str):
+        return False
+    new_rank = state_order.get(new_state)
+    stored_rank = state_order.get(stored_state)
+    return new_rank is not None and stored_rank is not None and new_rank < stored_rank
+
+
+def _merge_info(
+    obj: OrderPayment | OrderRefund,
+    updates: dict[str, Any],
+    remove: Iterable[str],
+    id_key: str,
+    state_order: dict[str, int],
+    snapshot_keys: Iterable[str],
+) -> dict[str, Any]:
+    model = OrderPayment if isinstance(obj, OrderPayment) else OrderRefund
+    with db_transaction.atomic():
+        locked = model.objects.select_for_update(of=OF_SELF).get(pk=obj.pk)
+        info_data = locked.info_data or {}
+        if _state_is_behind(info_data, updates, id_key, state_order):
+            held_back = set(snapshot_keys)
+            updates = {k: v for k, v in updates.items() if k not in held_back}
+        for key in remove:
+            info_data.pop(key, None)
+        info_data.update(updates)
+        locked.info_data = info_data
+        locked.save(update_fields=["info"])
+
+    obj.info = locked.info
+    cast(Any, obj).state = locked.state
+    return info_data
+
+
+def merge_payment_info(
+    payment: OrderPayment,
+    updates: dict[str, Any],
+    remove: Iterable[str] = (),
+) -> dict[str, Any]:
+    """
+    Write keys into a payment's info_data without losing anyone else's.
+
+    PostFinance sends several webhooks for one transaction within seconds,
+    and the customer returning from the payment page reads the same
+    transaction again, so more than one request can be holding the same
+    payment at once. Saving the info that was loaded before an API call
+    would overwrite whatever another request wrote in the meantime — an
+    installment token, say. The merge is therefore applied to the row as it
+    stands under a lock, which is held only for the merge: never across a
+    call to PostFinance.
+
+    Nor does a request that fetched the transaction earlier than another, but
+    got here later, get to wind its recorded state back: a confirmed payment
+    showing PROCESSING instead of FULFILL could no longer be refunded. When
+    the state in ``updates`` is older than the stored one for the same
+    transaction, the transaction snapshot (state, payment method, creation
+    date) is left as it is and only the other keys are written.
+
+    The in-memory payment is brought up to date with the locked row, state
+    included, so the caller decides what to do next on what is actually
+    stored rather than on what it loaded.
+
+    :returns: The info_data now stored on the payment.
+    """
+    return _merge_info(
+        payment,
+        updates,
+        remove,
+        id_key="transaction_id",
+        state_order=TRANSACTION_STATE_ORDER,
+        snapshot_keys=TRANSACTION_SNAPSHOT_KEYS,
+    )
+
+
+def merge_refund_info(refund: OrderRefund, updates: dict[str, Any]) -> dict[str, Any]:
+    """
+    Write keys into a refund's info_data without losing anyone else's.
+
+    The refund counterpart of `merge_payment_info()`, for the same reasons:
+    PostFinance can send more than one webhook for a refund at once.
+    """
+    return _merge_info(
+        refund,
+        updates,
+        (),
+        id_key="refund_id",
+        state_order=REFUND_STATE_ORDER,
+        snapshot_keys=("state",),
+    )
+
+
+def mark_payment_pending(payment: OrderPayment) -> bool:
+    """
+    Move a payment from created to pending, if it is still created.
+
+    A conditional update rather than a save of the loaded state: a webhook
+    for an intermediate state that read the payment as created must not put
+    it back to pending after a concurrent webhook has confirmed it.
+
+    :returns: Whether the payment was moved.
+    """
+    moved = OrderPayment.objects.filter(
+        pk=payment.pk, state=OrderPayment.PAYMENT_STATE_CREATED
+    ).update(state=OrderPayment.PAYMENT_STATE_PENDING)
+    if moved:
+        cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
+    return bool(moved)
+
+
+def mark_refund_done(refund: OrderRefund) -> bool:
+    """
+    Mark a refund done, unless it already is.
+
+    pretix's `OrderRefund.done()` takes no lock and saves every field, so two
+    webhooks for the same successful refund would both log it as done, and
+    each would write back the info it loaded. It is run here on the locked
+    row instead, which the second one then finds done. The lock covers only
+    pretix's bookkeeping, no call to PostFinance.
+
+    :returns: Whether the refund was marked done by this call.
+    """
+    with db_transaction.atomic():
+        locked = OrderRefund.objects.select_for_update(of=OF_SELF).get(pk=refund.pk)
+        done = locked.state != OrderRefund.REFUND_STATE_DONE
+        if done:
+            locked.done()
+
+    refund.info = locked.info
+    cast(Any, refund).state = locked.state
+    cast(Any, refund).execution_date = locked.execution_date
+    return done
+
+
+def mark_refund_failed(refund: OrderRefund) -> bool:
+    """
+    Mark a refund failed, unless it is already done or failed.
+
+    A conditional update, so a webhook that loaded the refund before another
+    one completed it cannot mark it failed afterwards.
+
+    :returns: Whether the refund was marked failed by this call.
+    """
+    moved = (
+        OrderRefund.objects.filter(pk=refund.pk)
+        .exclude(state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_FAILED))
+        .update(state=OrderRefund.REFUND_STATE_FAILED)
+    )
+    if moved:
+        cast(Any, refund).state = OrderRefund.REFUND_STATE_FAILED
+    return bool(moved)
 
 
 def _line_item_type(amount: Decimal, positive_type: LineItemType) -> LineItemType:
@@ -1626,9 +1832,10 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 payment_method = transaction.payment_connector_configuration.name
 
             state = transaction.state
-            info_data = payment.info_data or {}
-            info_data.pop(PENDING_TRANSACTION_ID_KEY, None)
-            info_data.update(
+            # Also re-reads the payment's state: a webhook may have processed
+            # the transaction first.
+            info_data = merge_payment_info(
+                payment,
                 {
                     "transaction_id": transaction_id,
                     SPACE_ID_KEY: client.space_id,
@@ -1637,10 +1844,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "created_on": str(transaction.created_on)
                     if transaction.created_on
                     else None,
-                }
+                },
+                remove=(PENDING_TRANSACTION_ID_KEY,),
             )
-            payment.info_data = info_data
-            payment.save(update_fields=["info"])
 
             logger.info(
                 "PostFinance transaction %s has state %s for payment %s",
@@ -1648,9 +1854,6 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 state,
                 payment.pk,
             )
-
-            # Check if already confirmed (webhook may have processed first)
-            payment.refresh_from_db()
 
             # A plan's first payment leaves behind the token every later
             # installment is charged against. The token exists from the moment
@@ -1699,10 +1902,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     state,
                 )
             else:
-                payment.refresh_from_db()
-                if payment.state == OrderPayment.PAYMENT_STATE_CREATED:
-                    cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
-                    payment.save(update_fields=["state"])
+                mark_payment_pending(payment)
                 logger.info(
                     "Payment %s is pending (PostFinance state: %s)",
                     payment.pk,
@@ -1711,19 +1911,17 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         except PostFinanceError as e:
             logger.exception("PostFinance API error during execute_payment: %s", e)
-            payment.info_data = {
-                **{
-                    k: v
-                    for k, v in (payment.info_data or {}).items()
-                    if k != PENDING_TRANSACTION_ID_KEY
+            merge_payment_info(
+                payment,
+                {
+                    "transaction_id": transaction_id,
+                    SPACE_ID_KEY: self._space_id_for_payment(payment),
+                    "error": str(e),
+                    "error_code": e.error_code,
+                    "error_status_code": e.status_code,
                 },
-                "transaction_id": transaction_id,
-                SPACE_ID_KEY: self._space_id_for_payment(payment),
-                "error": str(e),
-                "error_code": e.error_code,
-                "error_status_code": e.status_code,
-            }
-            payment.save(update_fields=["info"])
+                remove=(PENDING_TRANSACTION_ID_KEY,),
+            )
             user_message = _("Payment processing failed. Please try again.")
             if e.status_code and e.status_code in ERROR_STATUS_MESSAGES:
                 user_message = ERROR_STATUS_MESSAGES[e.status_code]
@@ -1731,18 +1929,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
         except Exception as e:
             logger.exception("Unexpected error during execute_payment: %s", e)
-            payment.info_data = {
-                **{
-                    k: v
-                    for k, v in (payment.info_data or {}).items()
-                    if k != PENDING_TRANSACTION_ID_KEY
+            merge_payment_info(
+                payment,
+                {
+                    "transaction_id": transaction_id,
+                    SPACE_ID_KEY: self._space_id_for_payment(payment),
+                    "error": str(e),
+                    "error_code": type(e).__name__,
                 },
-                "transaction_id": transaction_id,
-                SPACE_ID_KEY: self._space_id_for_payment(payment),
-                "error": str(e),
-                "error_code": type(e).__name__,
-            }
-            payment.save(update_fields=["info"])
+                remove=(PENDING_TRANSACTION_ID_KEY,),
+            )
             raise PaymentException(
                 str(_("An unexpected error occurred. Please try again."))
             ) from e
@@ -1846,9 +2042,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         token_data.pop("charged_amount", None)
         plan.store_payment_token(token_data)
 
-        info_data[TOKEN_ID_KEY] = token_id
-        payment.info_data = info_data
-        payment.save(update_fields=["info"])
+        merge_payment_info(payment, {TOKEN_ID_KEY: token_id})
 
         logger.info(
             "Stored payment token %s for installment plan %s",
@@ -2517,6 +2711,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             user: The user performing the action (for audit logging).
         """
         payment = cast(OrderPayment, refund.payment)
+        order = cast("Order", refund.order)
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
 
@@ -2547,9 +2742,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # second refund is quietly skipped rather than rejected.
             external_id = (
                 f"pretix-{self.event.organizer.slug}-{self.event.slug}"
-                f"-{refund.order.code}-R-{refund.local_id}"
+                f"-{order.code}-R-{refund.local_id}"
             )
-            merchant_reference = f"{self.event.slug}-{refund.order.code}"
+            merchant_reference = f"{self.event.slug}-{order.code}"
 
             postfinance_refund = client.refund_transaction(
                 transaction_id=int(transaction_id),
@@ -2558,11 +2753,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 amount=self._refund_transaction_amount(refund),
             )
 
+            refund_state = (
+                postfinance_refund.state.value if postfinance_refund.state else None
+            )
+
             # Store refund info on the OrderRefund object
             refund.info_data = {
                 "refund_id": postfinance_refund.id,
                 SPACE_ID_KEY: client.space_id,
-                "state": postfinance_refund.state.value if postfinance_refund.state else None,
+                "state": refund_state,
                 "amount": float(postfinance_refund.amount) if postfinance_refund.amount else None,
                 "created_on": str(postfinance_refund.created_on)
                 if postfinance_refund.created_on
@@ -2572,14 +2771,30 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             refund.save(update_fields=["info", "state"])
 
             logger.info(
-                "PostFinance refund %s created for payment %s (amount %s)",
+                "PostFinance refund %s created for payment %s (amount %s, state %s)",
                 postfinance_refund.id,
                 payment.pk,
                 refund.amount,
+                refund_state,
             )
 
+            if refund_state == RefundState.FAILED.value:
+                order.log_action(
+                    "pretix_postfinance.refund.failed",
+                    data={
+                        "transaction_id": transaction_id,
+                        "refund_id": postfinance_refund.id,
+                        "amount": str(refund.amount),
+                        "user": user,
+                        "success": False,
+                        "state": refund_state,
+                    },
+                )
+                # pretix marks the refund failed and shows the error.
+                raise PaymentException(str(_("Refund failed. Please try again.")))
+
             # Audit log for successful refund
-            refund.order.log_action(
+            order.log_action(
                 "pretix_postfinance.refund",
                 data={
                     "transaction_id": transaction_id,
@@ -2589,6 +2804,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "success": True,
                 },
             )
+
+            # A refund PostFinance already reports as successful is completed
+            # here rather than left to the webhook, as the webhook would on
+            # the same state. The webhook finds a refund by the ID saved just
+            # above, so one PostFinance sends before that save finds nothing
+            # and is never retried: the refund would otherwise stay in transit
+            # for good. Any other state stays in transit for the webhook to
+            # settle; a refund still pending must not be marked done.
+            if refund_state == RefundState.SUCCESSFUL.value:
+                mark_refund_done(refund)
 
         except PostFinanceError as e:
             logger.exception(
@@ -2609,7 +2834,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             refund.save(update_fields=["info"])
 
             # Audit log for failed refund
-            refund.order.log_action(
+            order.log_action(
                 "pretix_postfinance.refund.failed",
                 data={
                     "transaction_id": transaction_id,

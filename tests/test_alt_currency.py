@@ -393,7 +393,7 @@ def test_full_refund_of_alt_currency_payment_sends_charged_amount(
     # so full refunds send the exact charge recorded at payment time.
     assert captured["amount"] == Decimal("12.43")
     refund.refresh_from_db()
-    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
+    assert refund.state == OrderRefund.REFUND_STATE_DONE
 
 
 @pytest.mark.django_db
