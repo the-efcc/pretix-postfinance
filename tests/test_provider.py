@@ -380,7 +380,7 @@ def test_refund_success(env, rf, monkeypatch, refund_factory):
     prov.execute_refund(refund)
 
     refund.refresh_from_db()
-    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
+    assert refund.state == OrderRefund.REFUND_STATE_DONE
 
 
 @pytest.mark.django_db
@@ -416,9 +416,107 @@ def test_refund_partial(env, rf, monkeypatch, refund_factory):
     prov.execute_refund(refund)
 
     refund.refresh_from_db()
-    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
+    assert refund.state == OrderRefund.REFUND_STATE_DONE
     assert refund.info_data.get("refund_id") == 789012
     assert refund.info_data.get("state") == "SUCCESSFUL"
+
+
+def _refundable_payment(order: Order) -> OrderPayment:
+    order.status = Order.STATUS_PAID
+    order.save()
+    return order.payments.create(
+        provider="postfinance",
+        amount=order.total,
+        info=json.dumps(
+            {
+                "transaction_id": 123456,
+                "state": TransactionState.FULFILL.value,
+            }
+        ),
+        state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("state", ["CREATE", "SCHEDULED", "PENDING", "MANUAL_CHECK"])
+def test_a_refund_not_yet_settled_waits_for_the_webhook(
+    env, monkeypatch, refund_factory, state
+):
+    """Only a final state settles a refund; anything else stays in transit."""
+    event, order = env
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
+        lambda self, **kwargs: refund_factory(state=state),
+    )
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(provider="postfinance", amount=order.total, payment=payment)
+
+    PostFinancePaymentProvider(event).execute_refund(refund)
+
+    refund.refresh_from_db()
+    assert refund.state == OrderRefund.REFUND_STATE_TRANSIT
+    assert refund.info_data["state"] == state
+    assert refund.info_data["refund_id"] == 789012
+
+
+@pytest.mark.django_db
+def test_a_refund_postfinance_reports_failed_raises(env, monkeypatch, refund_factory):
+    """
+    pretix marks the refund failed and shows the error when execute_refund()
+    raises, instead of leaving it in transit for a webhook that may never
+    find it.
+    """
+    event, order = env
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
+        lambda self, **kwargs: refund_factory(state="FAILED"),
+    )
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(provider="postfinance", amount=order.total, payment=payment)
+
+    with pytest.raises(PaymentException):
+        PostFinancePaymentProvider(event).execute_refund(refund)
+
+    refund.refresh_from_db()
+    assert refund.state != OrderRefund.REFUND_STATE_DONE
+    # The refund stays findable for a later webhook and for support.
+    assert refund.info_data["refund_id"] == 789012
+    assert refund.info_data["state"] == "FAILED"
+    failed = order.all_logentries().get(action_type="pretix_postfinance.refund.failed")
+    assert "FAILED" in str(failed.display())
+
+
+@pytest.mark.django_db
+def test_a_refund_the_webhook_completed_first_is_done_once(
+    env, monkeypatch, refund_factory
+):
+    """
+    The webhook can complete the refund between execute_refund() saving it and
+    marking it done; it is then not marked done a second time.
+    """
+    event, order = env
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(provider="postfinance", amount=order.total, payment=payment)
+
+    real_save = OrderRefund.save
+
+    def save_then_webhook(self, *args, **kwargs):
+        real_save(self, *args, **kwargs)
+        if self.pk == refund.pk and self.state == OrderRefund.REFUND_STATE_TRANSIT:
+            OrderRefund.objects.get(pk=self.pk).done()
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction",
+        lambda self, **kwargs: refund_factory(state="SUCCESSFUL"),
+    )
+    monkeypatch.setattr(OrderRefund, "save", save_then_webhook)
+
+    PostFinancePaymentProvider(event).execute_refund(refund)
+
+    refund.refresh_from_db()
+    assert refund.state == OrderRefund.REFUND_STATE_DONE
+    done_logs = order.all_logentries().filter(action_type="pretix.event.order.refund.done")
+    assert done_logs.count() == 1
 
 
 @pytest.mark.django_db

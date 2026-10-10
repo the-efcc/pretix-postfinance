@@ -48,6 +48,11 @@ class PostFinanceRefundFailedLogEntryType(OrderLogEntryType):
 
     def display(self, logentry, data):
         error = data.get("error")
+        if error is None:
+            # PostFinance accepted the request but reported the refund failed.
+            return _("PostFinance refund failed (state: {state}).").format(
+                state=data.get("state")
+            )
         return _("PostFinance refund failed: {error}.").format(error=error)
 
 

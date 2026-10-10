@@ -2711,6 +2711,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             user: The user performing the action (for audit logging).
         """
         payment = cast(OrderPayment, refund.payment)
+        order = cast("Order", refund.order)
         info_data = payment.info_data or {}
         transaction_id = info_data.get("transaction_id")
 
@@ -2741,9 +2742,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # second refund is quietly skipped rather than rejected.
             external_id = (
                 f"pretix-{self.event.organizer.slug}-{self.event.slug}"
-                f"-{refund.order.code}-R-{refund.local_id}"
+                f"-{order.code}-R-{refund.local_id}"
             )
-            merchant_reference = f"{self.event.slug}-{refund.order.code}"
+            merchant_reference = f"{self.event.slug}-{order.code}"
 
             postfinance_refund = client.refund_transaction(
                 transaction_id=int(transaction_id),
@@ -2752,11 +2753,15 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                 amount=self._refund_transaction_amount(refund),
             )
 
+            refund_state = (
+                postfinance_refund.state.value if postfinance_refund.state else None
+            )
+
             # Store refund info on the OrderRefund object
             refund.info_data = {
                 "refund_id": postfinance_refund.id,
                 SPACE_ID_KEY: client.space_id,
-                "state": postfinance_refund.state.value if postfinance_refund.state else None,
+                "state": refund_state,
                 "amount": float(postfinance_refund.amount) if postfinance_refund.amount else None,
                 "created_on": str(postfinance_refund.created_on)
                 if postfinance_refund.created_on
@@ -2766,14 +2771,30 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             refund.save(update_fields=["info", "state"])
 
             logger.info(
-                "PostFinance refund %s created for payment %s (amount %s)",
+                "PostFinance refund %s created for payment %s (amount %s, state %s)",
                 postfinance_refund.id,
                 payment.pk,
                 refund.amount,
+                refund_state,
             )
 
+            if refund_state == RefundState.FAILED.value:
+                order.log_action(
+                    "pretix_postfinance.refund.failed",
+                    data={
+                        "transaction_id": transaction_id,
+                        "refund_id": postfinance_refund.id,
+                        "amount": str(refund.amount),
+                        "user": user,
+                        "success": False,
+                        "state": refund_state,
+                    },
+                )
+                # pretix marks the refund failed and shows the error.
+                raise PaymentException(str(_("Refund failed. Please try again.")))
+
             # Audit log for successful refund
-            refund.order.log_action(
+            order.log_action(
                 "pretix_postfinance.refund",
                 data={
                     "transaction_id": transaction_id,
@@ -2783,6 +2804,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     "success": True,
                 },
             )
+
+            # A refund PostFinance already reports as successful is completed
+            # here rather than left to the webhook, as the webhook would on
+            # the same state. The webhook finds a refund by the ID saved just
+            # above, so one PostFinance sends before that save finds nothing
+            # and is never retried: the refund would otherwise stay in transit
+            # for good. Any other state stays in transit for the webhook to
+            # settle; a refund still pending must not be marked done.
+            if refund_state == RefundState.SUCCESSFUL.value:
+                mark_refund_done(refund)
 
         except PostFinanceError as e:
             logger.exception(
@@ -2803,7 +2834,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             refund.save(update_fields=["info"])
 
             # Audit log for failed refund
-            refund.order.log_action(
+            order.log_action(
                 "pretix_postfinance.refund.failed",
                 data={
                     "transaction_id": transaction_id,
