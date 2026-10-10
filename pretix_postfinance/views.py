@@ -46,7 +46,10 @@ from .payment import (
     SPACE_ID_KEY,
     SUCCESS_STATES,
     mark_payment_pending,
+    mark_refund_done,
+    mark_refund_failed,
     merge_payment_info,
+    merge_refund_info,
     webhook_url,
 )
 
@@ -640,26 +643,28 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
             e.error_code,
         )
         # Store error details in refund.info for admin visibility
-        info_data = refund.info_data or {}
-        info_data.update(
+        merge_refund_info(
+            refund,
             {
                 "error": str(e),
                 "error_code": e.error_code,
                 "error_status_code": e.status_code,
-            }
+            },
         )
-        refund.info = json.dumps(info_data)
-        refund.save(update_fields=["info"])
         return (WEBHOOK_STATUS_API_ERROR, None)
 
     refund_state = pf_refund.state
 
-    info_data = refund.info_data or {}
-    info_data["refund_id"] = entity_id
-    info_data[SPACE_ID_KEY] = space_id
-    info_data["state"] = refund_state.value if refund_state else None
-    refund.info = json.dumps(info_data)
-    refund.save(update_fields=["info"])
+    # Merged into the stored row, as for transactions: other webhooks for this
+    # refund may have written to it since it was loaded.
+    merge_refund_info(
+        refund,
+        {
+            "refund_id": entity_id,
+            SPACE_ID_KEY: space_id,
+            "state": refund_state.value if refund_state else None,
+        },
+    )
 
     refund.order.log_action(
         "pretix_postfinance.refund.webhook",
@@ -670,15 +675,12 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
     )
 
     if refund_state and refund_state.value == "SUCCESSFUL":
-        if refund.state != OrderRefund.REFUND_STATE_DONE:
-            refund.done()
+        if mark_refund_done(refund):
             logger.info("PostFinance webhook: refund %s marked done", refund.pk)
         return (WEBHOOK_STATUS_OK, True)
 
     if refund_state and refund_state.value == "FAILED":
-        if refund.state not in (OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_FAILED):
-            refund.state = OrderRefund.REFUND_STATE_FAILED
-            refund.save(update_fields=["state"])
+        if mark_refund_failed(refund):
             refund.order.log_action(
                 "pretix.event.order.refund.failed",
                 {

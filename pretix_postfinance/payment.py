@@ -25,6 +25,7 @@ from postfinancecheckout.models import (
     CustomersPresence,
     LineItemCreate,
     LineItemType,
+    RefundState,
     TokenizationMode,
     TransactionState,
 )
@@ -197,6 +198,90 @@ def webhook_url() -> str:
     return urlunparse(built._replace(scheme=override.scheme, netloc=override.netloc))
 
 
+# Where each state comes in a transaction's lifecycle at PostFinance, so a
+# state fetched before another can be recognised as the older of the two. The
+# terminal states share the last rank: a transaction reaches only one of them.
+TRANSACTION_STATE_ORDER = {
+    TransactionState.CREATE.value: 0,
+    TransactionState.PENDING.value: 1,
+    TransactionState.CONFIRMED.value: 2,
+    TransactionState.PROCESSING.value: 3,
+    TransactionState.AUTHORIZED.value: 4,
+    TransactionState.COMPLETED.value: 5,
+    TransactionState.FAILED.value: 6,
+    TransactionState.VOIDED.value: 6,
+    TransactionState.DECLINE.value: 6,
+    TransactionState.FULFILL.value: 6,
+}
+
+# The same for a refund.
+REFUND_STATE_ORDER = {
+    RefundState.CREATE.value: 0,
+    RefundState.SCHEDULED.value: 1,
+    RefundState.PENDING.value: 2,
+    RefundState.MANUAL_CHECK.value: 3,
+    RefundState.FAILED.value: 4,
+    RefundState.SUCCESSFUL.value: 4,
+}
+
+# info_data keys describing a transaction as it was when fetched. They are
+# written together and held back together when the fetch turns out to be older
+# than what is already stored.
+TRANSACTION_SNAPSHOT_KEYS = ("state", "payment_method", "created_on")
+
+
+def _state_is_behind(
+    stored: dict[str, Any],
+    updates: dict[str, Any],
+    id_key: str,
+    state_order: dict[str, int],
+) -> bool:
+    """
+    Whether ``updates`` carries an older state of the entity than ``stored``.
+
+    Only states of the same entity are compared: a payment retried with a new
+    transaction starts that transaction's lifecycle over. An unknown state on
+    either side is never treated as older.
+    """
+    if "state" not in updates:
+        return False
+    if id_key in updates and str(updates[id_key]) != str(stored.get(id_key)):
+        return False
+    new_state = updates["state"]
+    stored_state = stored.get("state")
+    if not isinstance(new_state, str) or not isinstance(stored_state, str):
+        return False
+    new_rank = state_order.get(new_state)
+    stored_rank = state_order.get(stored_state)
+    return new_rank is not None and stored_rank is not None and new_rank < stored_rank
+
+
+def _merge_info(
+    obj: OrderPayment | OrderRefund,
+    updates: dict[str, Any],
+    remove: Iterable[str],
+    id_key: str,
+    state_order: dict[str, int],
+    snapshot_keys: Iterable[str],
+) -> dict[str, Any]:
+    model = OrderPayment if isinstance(obj, OrderPayment) else OrderRefund
+    with db_transaction.atomic():
+        locked = model.objects.select_for_update(of=OF_SELF).get(pk=obj.pk)
+        info_data = locked.info_data or {}
+        if _state_is_behind(info_data, updates, id_key, state_order):
+            held_back = set(snapshot_keys)
+            updates = {k: v for k, v in updates.items() if k not in held_back}
+        for key in remove:
+            info_data.pop(key, None)
+        info_data.update(updates)
+        locked.info_data = info_data
+        locked.save(update_fields=["info"])
+
+    obj.info = locked.info
+    cast(Any, obj).state = locked.state
+    return info_data
+
+
 def merge_payment_info(
     payment: OrderPayment,
     updates: dict[str, Any],
@@ -214,24 +299,44 @@ def merge_payment_info(
     stands under a lock, which is held only for the merge: never across a
     call to PostFinance.
 
+    Nor does a request that fetched the transaction earlier than another, but
+    got here later, get to wind its recorded state back: a confirmed payment
+    showing PROCESSING instead of FULFILL could no longer be refunded. When
+    the state in ``updates`` is older than the stored one for the same
+    transaction, the transaction snapshot (state, payment method, creation
+    date) is left as it is and only the other keys are written.
+
     The in-memory payment is brought up to date with the locked row, state
     included, so the caller decides what to do next on what is actually
     stored rather than on what it loaded.
 
     :returns: The info_data now stored on the payment.
     """
-    with db_transaction.atomic():
-        locked = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
-        info_data = locked.info_data or {}
-        for key in remove:
-            info_data.pop(key, None)
-        info_data.update(updates)
-        locked.info_data = info_data
-        locked.save(update_fields=["info"])
+    return _merge_info(
+        payment,
+        updates,
+        remove,
+        id_key="transaction_id",
+        state_order=TRANSACTION_STATE_ORDER,
+        snapshot_keys=TRANSACTION_SNAPSHOT_KEYS,
+    )
 
-    payment.info = locked.info
-    cast(Any, payment).state = locked.state
-    return info_data
+
+def merge_refund_info(refund: OrderRefund, updates: dict[str, Any]) -> dict[str, Any]:
+    """
+    Write keys into a refund's info_data without losing anyone else's.
+
+    The refund counterpart of `merge_payment_info()`, for the same reasons:
+    PostFinance can send more than one webhook for a refund at once.
+    """
+    return _merge_info(
+        refund,
+        updates,
+        (),
+        id_key="refund_id",
+        state_order=REFUND_STATE_ORDER,
+        snapshot_keys=("state",),
+    )
 
 
 def mark_payment_pending(payment: OrderPayment) -> bool:
@@ -249,6 +354,49 @@ def mark_payment_pending(payment: OrderPayment) -> bool:
     ).update(state=OrderPayment.PAYMENT_STATE_PENDING)
     if moved:
         cast(Any, payment).state = OrderPayment.PAYMENT_STATE_PENDING
+    return bool(moved)
+
+
+def mark_refund_done(refund: OrderRefund) -> bool:
+    """
+    Mark a refund done, unless it already is.
+
+    pretix's `OrderRefund.done()` takes no lock and saves every field, so two
+    webhooks for the same successful refund would both log it as done, and
+    each would write back the info it loaded. It is run here on the locked
+    row instead, which the second one then finds done. The lock covers only
+    pretix's bookkeeping, no call to PostFinance.
+
+    :returns: Whether the refund was marked done by this call.
+    """
+    with db_transaction.atomic():
+        locked = OrderRefund.objects.select_for_update(of=OF_SELF).get(pk=refund.pk)
+        done = locked.state != OrderRefund.REFUND_STATE_DONE
+        if done:
+            locked.done()
+
+    refund.info = locked.info
+    cast(Any, refund).state = locked.state
+    cast(Any, refund).execution_date = locked.execution_date
+    return done
+
+
+def mark_refund_failed(refund: OrderRefund) -> bool:
+    """
+    Mark a refund failed, unless it is already done or failed.
+
+    A conditional update, so a webhook that loaded the refund before another
+    one completed it cannot mark it failed afterwards.
+
+    :returns: Whether the refund was marked failed by this call.
+    """
+    moved = (
+        OrderRefund.objects.filter(pk=refund.pk)
+        .exclude(state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_FAILED))
+        .update(state=OrderRefund.REFUND_STATE_FAILED)
+    )
+    if moved:
+        cast(Any, refund).state = OrderRefund.REFUND_STATE_FAILED
     return bool(moved)
 
 
