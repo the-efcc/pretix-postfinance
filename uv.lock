@@ -1929,7 +1929,7 @@ wheels = [
 
 [[package]]
 name = "postfinancecheckout"
-version = "6.3.0"
+version = "7.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
@@ -1939,7 +1939,7 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/cf/bedf9a7fb3e9560ef1e39fa763d2fc7574b528c61f390c55ca0b3f8910e0/postfinancecheckout-6.3.0.tar.gz", hash = "sha256:04cb27d7878d47fd11b2b620cb9504bf82090148469cd4257bc2e2e5d871b8d7", size = 430845, upload-time = "2025-12-11T13:50:12.011Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/48/56301d635d364cd46d85bb3c9726aee3a8c0e71c96e67591d1e3a37e9c17/postfinancecheckout-7.0.0.tar.gz", hash = "sha256:e7efc5bc74cff9d4d27993897572d089bd653fd91f25f42c5e1e31f92c0b521a", size = 491167, upload-time = "2026-10-28T17:18:29.765Z" }
 
 [[package]]
 name = "pretix"
@@ -2060,7 +2060,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.9.1" },
-    { name = "postfinancecheckout", specifier = ">=6.0.0" },
+    { name = "postfinancecheckout", specifier = ">=6.0.0,<8" },
     { name = "pretix", marker = "extra == 'dev'", specifier = ">=2026.3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },

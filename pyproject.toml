@@ -29,7 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "postfinancecheckout>=6.0.0",
+    "postfinancecheckout>=6.0.0,<8",
 ]
 
 [project.optional-dependencies]

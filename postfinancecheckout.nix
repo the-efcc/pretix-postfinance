@@ -19,7 +19,7 @@
 
 buildPythonPackage rec {
   pname = "postfinancecheckout";
-  version = "6.3.0";
+  version = "7.0.0";
 
   pyproject = true;
 
@@ -27,7 +27,7 @@ buildPythonPackage rec {
     owner = "pfpayments";
     repo = "python-sdk";
     rev = version;
-    hash = "sha256-xGN8px84BbcD5hILjO20+kqHLWhbDDJairBJL7JcGKM=";
+    hash = "sha256-2vMk7ZA2cToBUzSTj5hMHO84pr912Imp0hWe3itfX+A=";
   };
 
   disabled = pythonOlder "3.11";
