@@ -48,6 +48,7 @@ from postfinancecheckout.service import (
     WebhookListenersService,
     WebhookURLsService,
 )
+from urllib3.exceptions import ConnectTimeoutError, HTTPError
 
 logger = logging.getLogger(__name__)
 
@@ -100,18 +101,33 @@ def _get_timeout() -> int:
 
 
 class PostFinanceError(Exception):
-    """Base exception for PostFinance API errors."""
+    """
+    Base exception for PostFinance API errors.
+
+    `connection_error` is set when no response came back at all: PostFinance
+    could not be reached, did not answer in time, or the connection broke.
+    Like a 5xx, that is worth retrying.
+
+    `outcome_unknown` is set when the request failed but may still have been
+    carried out, so it must not be reported as rejected. Only
+    `refund_transaction()` sets it.
+    """
 
     def __init__(
         self,
         message: str,
         status_code: int | None = None,
         error_code: str | None = None,
+        *,
+        connection_error: bool = False,
+        outcome_unknown: bool = False,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.error_code = error_code
+        self.connection_error = connection_error
+        self.outcome_unknown = outcome_unknown
 
 
 def _format_api_exception_message(e: ApiException) -> str:
@@ -210,6 +226,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting space: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting space: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def get_payment_method_configurations(self) -> list[PaymentMethodConfiguration]:
         """
@@ -242,6 +261,11 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting payment method configurations: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error(
+                "PostFinance connection error getting payment method configurations: %s", e
+            )
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def create_transaction(
         self,
@@ -321,6 +345,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error creating transaction: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error creating transaction: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def get_payment_page_url(self, transaction_id: int) -> str:
         """
@@ -350,6 +377,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting payment page URL: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting payment page URL: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def get_transaction(self, transaction_id: int) -> Transaction:
         """
@@ -379,6 +409,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting transaction: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting transaction: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def process_with_token(self, transaction_id: int) -> Charge:
         """
@@ -415,6 +448,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error processing with token: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error processing with token: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def refund_transaction(
         self,
@@ -442,7 +478,9 @@ class PostFinanceClient:
 
         Raises:
             PostFinanceError: If the request fails (e.g., transaction not
-                in a refundable state, already fully refunded, etc.).
+                in a refundable state, already fully refunded, etc.). Its
+                `outcome_unknown` is set if PostFinance may have created the
+                refund all the same.
         """
         amount_float = float(amount) if amount is not None else None
         refund_create = RefundCreate(
@@ -453,6 +491,30 @@ class PostFinanceClient:
             amount=amount_float,
         )
 
+        # A request that timed out, lost its connection or got a 5xx may well
+        # have reached PostFinance and created the refund. Sending it again is
+        # how to find out: PostFinance does not execute a refund twice for one
+        # external ID, and answers the repeat with the refund it created.
+        try:
+            return self._post_refund(refund_create)
+        except PostFinanceError as e:
+            if not e.outcome_unknown:
+                raise
+            logger.warning(
+                "PostFinance refund %s may have been created (%s), asking again",
+                external_id,
+                e,
+            )
+
+        try:
+            return self._post_refund(refund_create)
+        except PostFinanceError as e:
+            # Even a plain rejection now does not prove the first request was
+            # rejected too, and calling it failed invites a second refund.
+            e.outcome_unknown = True
+            raise
+
+    def _post_refund(self, refund_create: RefundCreate) -> Refund:
         try:
             return self._refunds_service.post_payment_refunds(
                 space=self.space_id,
@@ -464,10 +526,23 @@ class PostFinanceClient:
                 message=_format_api_exception_message(e),
                 status_code=e.status,
                 error_code=str(e.status),
+                # A 4xx is a rejection. Anything else, including the status 0
+                # the SDK uses for SSL errors, says nothing about the refund.
+                outcome_unknown=not 400 <= (e.status or 0) < 500,
             ) from e
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error creating refund: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except ConnectTimeoutError as e:
+            # Never connected (including DNS failures and refused connections),
+            # so nothing was sent.
+            logger.error("PostFinance connection error creating refund: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error creating refund: %s", e)
+            raise PostFinanceError(
+                message=str(e), connection_error=True, outcome_unknown=True
+            ) from e
 
     def get_refund(self, refund_id: int) -> Refund:
         """
@@ -497,6 +572,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting refund: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting refund: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def is_webhook_signature_valid(
         self,
@@ -537,6 +615,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error validating webhook signature: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error validating webhook signature: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def get_webhook_urls(self) -> list[WebhookUrl]:
         """
@@ -564,6 +645,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting webhook URLs: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting webhook URLs: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def create_webhook_url(self, name: str, url: str) -> WebhookUrl:
         """
@@ -600,6 +684,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error creating webhook URL: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error creating webhook URL: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def get_webhook_listeners(self) -> list[WebhookListener]:
         """
@@ -627,6 +714,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error getting webhook listeners: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error getting webhook listeners: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def create_webhook_listener(
         self,
@@ -677,6 +767,9 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error creating webhook listener: %s", e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error creating webhook listener: %s", e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e
 
     def setup_webhooks(self, webhook_url: str) -> dict[str, int | bool | None]:
         """
@@ -822,3 +915,6 @@ class PostFinanceClient:
         except PostFinanceCheckoutSdkException as e:
             logger.error("PostFinance SDK error deleting token %s: %s", token_id, e)
             raise PostFinanceError(message=str(e)) from e
+        except HTTPError as e:
+            logger.error("PostFinance connection error deleting token %s: %s", token_id, e)
+            raise PostFinanceError(message=str(e), connection_error=True) from e

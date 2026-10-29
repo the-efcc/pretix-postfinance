@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: pretix-postfinance\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-10 13:08+0000\n"
+"POT-Creation-Date: 2026-10-29 08:07+0000\n"
 "PO-Revision-Date: 2026-08-26 16:32+0000\n"
 "Last-Translator: pretix-postfinance contributors\n"
 "Language-Team: Italian\n"
@@ -502,29 +502,42 @@ msgstr ""
 "Questo pagamento è già stato rimborsato per intero in {currency}. "
 "Controllare la dashboard di PostFinance."
 
-#: payment.py:2718
+#: payment.py:2719
 msgid "Transaction ID not found."
 msgstr "ID della transazione non trovato."
 
-#: payment.py:2728
+#: payment.py:2729
 #, python-brace-format
 msgid "Transaction cannot be refunded. Current state: {state}"
 msgstr "La transazione non può essere rimborsata. Stato attuale: {state}"
 
-#: payment.py:2793 payment.py:2846
+#: payment.py:2801 payment.py:2873
 msgid "Refund failed. Please try again."
 msgstr "Rimborso non riuscito. Riprovare."
 
-#: payment.py:3031
+#: payment.py:2986
+#, python-brace-format
+msgid ""
+"PostFinance did not confirm whether this refund was created. Look for a "
+"refund with the external ID {external_id} on the transaction in PostFinance: "
+"if it is there, confirm this refund as done, otherwise cancel it and refund "
+"again."
+msgstr ""
+"PostFinance non ha confermato se questo rimborso è stato creato. Cercare in "
+"PostFinance, nella transazione, un rimborso con l'ID esterno {external_id}: "
+"se è presente, confermare questo rimborso come completato, altrimenti "
+"annullarlo ed effettuare di nuovo il rimborso."
+
+#: payment.py:3074
 msgid "PostFinance (production space)"
 msgstr "PostFinance (spazio di produzione)"
 
-#: payment.py:3058
+#: payment.py:3101
 #, python-brace-format
 msgid "{name} (production space)"
 msgstr "{name} (spazio di produzione)"
 
-#: payment.py:3067
+#: payment.py:3110
 msgid ""
 "This payment method uses your production PostFinance space. Payments are "
 "real and will be charged even though the event is in test mode."
@@ -557,6 +570,11 @@ msgstr "Rimborso PostFinance non riuscito (stato: {state})."
 #, python-brace-format
 msgid "PostFinance refund failed: {error}."
 msgstr "Rimborso PostFinance non riuscito: {error}."
+
+#: signals.py:65
+#, python-brace-format
+msgid "PostFinance did not confirm whether the refund was created: {error}."
+msgstr "PostFinance non ha confermato se il rimborso è stato creato: {error}."
 
 #: templates/pretixplugins/postfinance/checkout_payment_confirm.html:6
 msgid ""
