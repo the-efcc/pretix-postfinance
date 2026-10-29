@@ -2746,6 +2746,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             merchant_reference = f"{self.event.slug}-{order.code}"
 
+            # Saved before the request: if this process dies before an answer
+            # comes back, the refund still names what to look for at
+            # PostFinance.
+            refund.info_data = {**(refund.info_data or {}), "external_id": external_id}
+            refund.save(update_fields=["info"])
+
             postfinance_refund = client.refund_transaction(
                 transaction_id=int(transaction_id),
                 external_id=external_id,
@@ -2760,6 +2766,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Store refund info on the OrderRefund object
             refund.info_data = {
                 "refund_id": postfinance_refund.id,
+                "external_id": external_id,
                 SPACE_ID_KEY: client.space_id,
                 "state": refund_state,
                 "amount": float(postfinance_refund.amount) if postfinance_refund.amount else None,
@@ -2832,6 +2839,25 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
             refund.info_data = refund_info_data
             refund.save(update_fields=["info"])
+
+            if e.outcome_unknown:
+                # The refund may have gone through. Reporting it failed would
+                # free its amount and invite a retry, which PostFinance takes
+                # as a new refund: the customer would be paid twice. Left
+                # created instead, it keeps its amount, pretix tells the admin
+                # it is not fully executed, and refund_control_render() says
+                # how to settle it.
+                order.log_action(
+                    "pretix_postfinance.refund.unknown",
+                    data={
+                        "transaction_id": transaction_id,
+                        "external_id": refund_info_data.get("external_id"),
+                        "amount": str(refund.amount),
+                        "user": user,
+                        "error": str(e),
+                    },
+                )
+                return
 
             # Audit log for failed refund
             order.log_action(
@@ -2948,6 +2974,21 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         if error_status and int(error_status) in ERROR_STATUS_MESSAGES:
             error_suggestion = ERROR_STATUS_MESSAGES[int(error_status)]
 
+        # Sent to PostFinance, but no answer said whether it was created
+        # (see execute_refund()). Only someone looking at PostFinance can tell.
+        outcome_unknown = (
+            refund.state == OrderRefund.REFUND_STATE_CREATED
+            and bool(info_data.get("external_id"))
+            and not info_data.get("refund_id")
+        )
+        if outcome_unknown:
+            error_suggestion = _(
+                "PostFinance did not confirm whether this refund was created. Look "
+                "for a refund with the external ID {external_id} on the transaction "
+                "in PostFinance: if it is there, confirm this refund as done, "
+                "otherwise cancel it and refund again."
+            ).format(external_id=info_data["external_id"])
+
         template = get_template("pretixplugins/postfinance/control_refund.html")
         ctx = {
             "request": request,
@@ -3005,6 +3046,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # fall back to re-converting and drift by a cent.
             kept = {
                 "refund_id": info_data.get("refund_id"),
+                "external_id": info_data.get("external_id"),
                 SPACE_ID_KEY: info_data.get(SPACE_ID_KEY),
                 "state": info_data.get("state"),
                 "amount": info_data.get("amount"),
