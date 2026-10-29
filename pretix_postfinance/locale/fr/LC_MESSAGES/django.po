@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: pretix-postfinance\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-06 11:14+0000\n"
+"POT-Creation-Date: 2026-11-08 09:52+0000\n"
 "PO-Revision-Date: 2026-08-26 16:32+0000\n"
 "Last-Translator: pretix-postfinance contributors\n"
 "Language-Team: French\n"
@@ -505,20 +505,33 @@ msgstr "ID de transaction introuvable."
 msgid "Transaction cannot be refunded. Current state: {state}"
 msgstr "La transaction ne peut pas être remboursée. État actuel : {state}"
 
-#: payment.py:2823 payment.py:2876
+#: payment.py:2830 payment.py:2902
 msgid "Refund failed. Please try again."
 msgstr "Le remboursement a échoué. Veuillez réessayer."
 
-#: payment.py:3061
+#: payment.py:3015
+#, python-brace-format
+msgid ""
+"PostFinance did not confirm whether this refund was created. Look for a "
+"refund with the external ID {external_id} on the transaction in PostFinance: "
+"if it is there, confirm this refund as done, otherwise cancel it and refund "
+"again."
+msgstr ""
+"PostFinance n'a pas confirmé si ce remboursement a été créé. Cherchez dans "
+"PostFinance, sur la transaction, un remboursement avec l'ID externe "
+"{external_id} : s'il y figure, confirmez ce remboursement comme fait, sinon "
+"annulez-le et remboursez à nouveau."
+
+#: payment.py:3103
 msgid "PostFinance (production space)"
 msgstr "PostFinance (espace de production)"
 
-#: payment.py:3088
+#: payment.py:3130
 #, python-brace-format
 msgid "{name} (production space)"
 msgstr "{name} (espace de production)"
 
-#: payment.py:3097
+#: payment.py:3139
 msgid ""
 "This payment method uses your production PostFinance space. Payments are "
 "real and will be charged even though the event is in test mode."
@@ -551,6 +564,11 @@ msgstr "Échec du remboursement PostFinance (état : {state})."
 #, python-brace-format
 msgid "PostFinance refund failed: {error}."
 msgstr "Échec du remboursement PostFinance : {error}."
+
+#: signals.py:65
+#, python-brace-format
+msgid "PostFinance did not confirm whether the refund was created: {error}."
+msgstr "PostFinance n'a pas confirmé si le remboursement a été créé : {error}."
 
 #: templates/pretixplugins/postfinance/checkout_payment_confirm.html:6
 msgid ""

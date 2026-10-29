@@ -152,7 +152,7 @@ def webhook(request: HttpRequest) -> HttpResponse:
     except PostFinanceError as e:
         logger.error("PostFinance webhook: signature validation error - %s", e)
         # Transient API errors should return 502 so PostFinance retries
-        if e.status_code and e.status_code >= 500:
+        if e.connection_error or (e.status_code and e.status_code >= 500):
             return JsonResponse(
                 {"error": "Signature validation service unavailable"}, status=502
             )
