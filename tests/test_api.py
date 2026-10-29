@@ -220,7 +220,10 @@ class _FakePostFinance(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def fake_postfinance(monkeypatch):
+def fake_postfinance(monkeypatch, settings):
+    # The pretix fork patches urllib3 to refuse connections to local addresses
+    # unless this is set, which would keep every request from the fake.
+    settings.ALLOW_HTTP_TO_PRIVATE_NETWORKS = True
     _FakePostFinance.answers = []
     _FakePostFinance.refunds = {}
     _FakePostFinance.requests = []
