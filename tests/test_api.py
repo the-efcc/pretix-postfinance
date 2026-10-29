@@ -1,4 +1,11 @@
+import json
 import os
+import socket
+import threading
+import time
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -160,3 +167,140 @@ class TestGetTimeout:
     def test_timeout_values(self, env_vars, expected):
         with patch.dict(os.environ, env_vars, clear=True):
             assert _get_timeout() == expected
+
+
+class _FakePostFinance(BaseHTTPRequestHandler):
+    """
+    Stands in for PostFinance, so that the real SDK and urllib3 run.
+
+    Each POST is answered with the next entry of `answers`. Like PostFinance,
+    it creates the refund before answering, whatever the answer, and answers
+    a repeated external ID with the refund it already created.
+    """
+
+    answers: ClassVar[list[str]] = []
+    refunds: ClassVar[dict[str, dict]] = {}
+    requests: ClassVar[list[dict]] = []
+
+    def log_message(self, *args):
+        pass
+
+    def _send(self, status, payload):
+        body = json.dumps(payload).encode()
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # The client stopped waiting, as a timeout test wants it to.
+
+    def do_POST(self):
+        refund_create = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.requests.append(refund_create)
+        answer = self.answers.pop(0)
+        if answer == "400":
+            self._send(400, {"message": "Amount exceeds the refundable amount"})
+            return
+        external_id = refund_create.get("externalId")
+        refund = self.refunds.setdefault(
+            external_id,
+            {"id": 555000 + len(self.refunds), "state": "PENDING", "externalId": external_id},
+        )
+        if answer == "slow":
+            # Longer than the client waits; the refund is created regardless.
+            time.sleep(2)
+        if answer == "502":
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b"Bad Gateway")
+            return
+        self._send(201, refund)
+
+
+@pytest.fixture
+def fake_postfinance(monkeypatch):
+    _FakePostFinance.answers = []
+    _FakePostFinance.refunds = {}
+    _FakePostFinance.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakePostFinance)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(PostFinanceClient, "DEFAULT_TIMEOUT", 1)
+    client = PostFinanceClient(
+        space_id=12345, user_id=67890, api_secret="dGVzdC1zZWNyZXQtdGVzdC1zZWNyZXQ="
+    )
+    client._configuration.host = f"http://127.0.0.1:{server.server_address[1]}/api/v2.0"
+    yield client, _FakePostFinance
+    server.shutdown()
+    server.server_close()
+
+
+def _refund(client):
+    return client.refund_transaction(
+        transaction_id=123456, external_id="pretix-org-ev-ABC12-R-1", amount=Decimal("5.00")
+    )
+
+
+class TestRefundTransactionOutcome:
+    @pytest.mark.parametrize("first_answer", ["502", "slow"], ids=["gateway-error", "timeout"])
+    def test_a_refund_that_may_have_been_created_is_asked_for_again(
+        self, fake_postfinance, first_answer
+    ):
+        client, fake = fake_postfinance
+        fake.answers = [first_answer, "201"]
+
+        refund = _refund(client)
+
+        assert refund.id == 555000
+        assert len(fake.requests) == 2
+        assert fake.requests[0] == fake.requests[1]
+        assert len(fake.refunds) == 1
+
+    def test_a_rejected_refund_is_not_sent_again(self, fake_postfinance):
+        client, fake = fake_postfinance
+        fake.answers = ["400"]
+
+        with pytest.raises(PostFinanceError) as exc_info:
+            _refund(client)
+
+        assert exc_info.value.status_code == 400
+        assert not exc_info.value.outcome_unknown
+        assert len(fake.requests) == 1
+
+    @pytest.mark.parametrize("second_answer", ["502", "slow", "400"])
+    def test_a_refund_still_unconfirmed_is_reported_unknown(
+        self, fake_postfinance, second_answer
+    ):
+        client, fake = fake_postfinance
+        fake.answers = ["502", second_answer]
+
+        with pytest.raises(PostFinanceError) as exc_info:
+            _refund(client)
+
+        assert exc_info.value.outcome_unknown
+        assert len(fake.requests) == 2
+
+    def test_a_refund_that_never_left_is_not_unknown(self, fake_postfinance):
+        client, _ = fake_postfinance
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            port = unused.getsockname()[1]
+        client._configuration.host = f"http://127.0.0.1:{port}/api/v2.0"
+
+        with pytest.raises(PostFinanceError) as exc_info:
+            _refund(client)
+
+        assert exc_info.value.connection_error
+        assert not exc_info.value.outcome_unknown
+
+
+def test_a_timeout_on_any_call_is_a_postfinance_error(fake_postfinance):
+    client, fake = fake_postfinance
+    fake.answers = ["slow"]
+
+    with pytest.raises(PostFinanceError) as exc_info:
+        client.create_transaction(currency="CHF", line_items=[])
+
+    assert exc_info.value.connection_error
+    assert exc_info.value.status_code is None

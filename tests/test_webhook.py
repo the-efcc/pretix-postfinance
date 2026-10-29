@@ -222,6 +222,27 @@ class TestWebhookSignatureValidation:
         assert "signature" in response.json().get("error", "").lower()
 
     @pytest.mark.django_db
+    def test_signature_key_unreachable_returns_502(self, webhook_env, client, monkeypatch):
+        """Not being able to fetch the key is no reason to reject the webhook for good."""
+
+        def unreachable(self, signature_header, content):
+            raise PostFinanceError("Read timed out", connection_error=True)
+
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.is_webhook_signature_valid",
+            unreachable,
+        )
+
+        response = client.post(
+            "/_postfinance/webhook/",
+            json.dumps(get_webhook_payload(123456)),
+            content_type="application/json",
+            HTTP_X_SIGNATURE="valid-signature",
+        )
+
+        assert response.status_code == 502
+
+    @pytest.mark.django_db
     def test_valid_signature_succeeds(self, webhook_env, client, monkeypatch):
         mock_transaction = MagicMock()
         mock_transaction.state = TransactionState.COMPLETED

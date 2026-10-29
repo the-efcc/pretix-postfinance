@@ -30,7 +30,12 @@ PostFinance Checkout payment plugin for pretix.
 
 ### Refund Flow
 1. Admin initiates refund -> `PostFinanceRefundView`
-2. Refund created via API -> refund ID stored
+2. Refund created via API -> refund ID stored. A request PostFinance may have
+   carried out without saying so (timeout, broken connection, 5xx) is sent once
+   more under the same external ID, which PostFinance answers with the refund
+   it already created. If that does not settle it either, the refund stays
+   `created` for the admin to check, never `failed`: pretix would free a failed
+   refund's amount, and refunding it again pays the customer twice.
 3. Webhook receives refund state updates -> `_process_refund_state()`
 4. Refund history tracked in `info_data['refund_history']`
 
