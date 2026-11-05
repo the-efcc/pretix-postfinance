@@ -459,6 +459,32 @@ def test_a_declined_charge_leaves_a_failed_payment(
 
 
 @pytest.mark.django_db
+def test_a_decline_reason_is_recorded_in_the_order_language(
+    installments_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    PostFinance gives its reasons in several languages at once. Recorded as
+    they come, the customer and the organizer read
+    "{'en-US': 'The token defined on the transaction is not active.'}".
+    """
+    installments_order.locale = "de"
+    installments_order.save(update_fields=["locale"])
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    postfinance.decline = {
+        "en-US": "The token defined on the transaction is not active.",
+        "de-CH": "Das auf der Transaktion definierte Token ist nicht aktiv.",
+    }
+    assert process_single_installment(due(plan, 2)) is False
+
+    installment = due(plan, 2)
+    reason = "Das auf der Transaktion definierte Token ist nicht aktiv."
+    assert installment.failure_reason == reason
+    assert installment.payment.info_data["error"] == reason
+
+
+@pytest.mark.django_db
 def test_a_webhook_for_an_automatic_charge_leaves_the_token_alone(
     installments_event, installments_order, pay_first_installment, postfinance, monkeypatch
 ):
