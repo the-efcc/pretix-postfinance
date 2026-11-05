@@ -1860,10 +1860,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # the transaction is tokenized, so this is deliberately not gated
             # on SUCCESS_STATES: a customer returning while the transaction was
             # still AUTHORIZED used to leave the plan with no token at all, and
-            # nothing later could repair it. Only a failed transaction has no
-            # token worth keeping.
+            # nothing later could repair it. A failed transaction's token is
+            # never activated, so the failure takes it back off the plan.
             if state not in FAILURE_STATES:
                 self.store_installment_token(payment, transaction)
+            else:
+                self.drop_installment_token(payment, transaction)
 
             if state in SUCCESS_STATES:
                 if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
@@ -2050,6 +2052,52 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             plan.pk,
         )
 
+
+    def drop_installment_token(self, payment: OrderPayment, transaction: Any) -> None:
+        """
+        Take a token back off its plan once the transaction it came from failed.
+
+        :py:meth:`store_installment_token` runs as soon as a transaction carries
+        a token, ahead of FULFILL and even of AUTHORIZED, so that a plan never
+        misses a token it could charge. But PostFinance only activates the
+        token once the transaction is authorized. One that fails before that
+        leaves it inactive for good, and pretix would go on charging it, each
+        charge refused with "The token defined on the transaction is not
+        active", until the plan's grace period ran out.
+
+        Only the token this transaction produced is removed, and only while it
+        is still the plan's: a later payment may have replaced it with one that
+        works. An automatic charge failing says nothing about the token it was
+        made with (it may have been declined for want of funds), so those are
+        left alone entirely.
+        """
+        if scheduled_installment_for_payment(payment) is None:
+            return
+        if (payment.info_data or {}).get(INSTALLMENT_CHARGE_KEY):
+            return
+
+        token = getattr(transaction, "token", None)
+        token_id = getattr(token, "id", None)
+        if not token_id:
+            return
+
+        plan = plan_for_order(payment.order)
+        if plan is None:
+            return
+
+        # Conditional on the stored token, in one statement, so a token another
+        # request stored in its place in the meantime is left alone.
+        dropped = type(plan).objects.filter(
+            pk=plan.pk, payment_token__token_id=token_id
+        ).update(payment_token={})
+        if dropped:
+            logger.info(
+                "Dropped payment token %s from installment plan %s: transaction %s "
+                "failed before PostFinance activated it",
+                token_id,
+                plan.pk,
+                getattr(transaction, "id", None),
+            )
     def _installment_fx(self, plan: Any) -> tuple[str, Decimal] | None:
         """
         Return the currency and rate an installment plan is charged at.

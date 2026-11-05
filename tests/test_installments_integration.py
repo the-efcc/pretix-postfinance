@@ -23,6 +23,7 @@ pytest.importorskip("pretix.efcc.models", reason="requires pretix with installme
 from pretix.base.services.installments import (
     cancel_installment_plan,
     create_installment_plan,
+    due_installments_queryset,
     process_single_installment,
 )
 from pretix.efcc.models import InstallmentPlan, ScheduledInstallment
@@ -569,6 +570,136 @@ def test_first_payment_stores_no_token_when_the_transaction_failed(
 
     plan.refresh_from_db()
     assert plan.payment_token == {}
+
+
+@pytest.fixture
+def webhooks(installments_event, monkeypatch):
+    """Deliver transaction webhooks the way PostFinance does, one at a time."""
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+
+    def _deliver(transaction_id):
+        with scopes_disabled():
+            return _process_transaction_webhook(transaction_id, 12345)
+
+    return _deliver
+
+
+def awaiting_transaction(plan, transaction_id=123456):
+    payment = first_payment_of(plan)
+    payment.info_data = {"transaction_id": transaction_id, "space_id": "12345"}
+    payment.save(update_fields=["info"])
+    return payment
+
+
+@pytest.mark.django_db
+def test_a_first_payment_that_fails_after_processing_leaves_no_token_to_charge(
+    installments_order, postfinance, webhooks
+):
+    """
+    The customer's checkout payment gets as far as PROCESSING, then fails.
+
+    The PROCESSING webhook already carries the token, and stores it. But
+    PostFinance never activates it, and once the checkout payment was dead
+    pretix charged installment 1 against it automatically -- refused with
+    "The token defined on the transaction is not active", as was every retry,
+    until the plan's grace period ran out.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    payment = awaiting_transaction(plan)
+
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.PROCESSING
+    webhooks(123456)
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+    postfinance.transaction.state = TransactionState.FAILED
+    webhooks(123456)
+    payment.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+    # With the checkout payment dead, installment 1 is pretix's to charge, and
+    # there is no inactive token left for it to be charged against.
+    with scopes_disabled():
+        assert due_installments_queryset().filter(pk=due(plan, 1).pk).exists()
+    assert process_single_installment(due(plan, 1)) is False
+    assert postfinance.token_charges() == []
+    assert due(plan, 1).failure_reason == "No payment token available"
+
+
+@pytest.mark.django_db
+def test_a_customer_returning_from_a_failed_payment_takes_the_token_back(
+    installments_event, installments_order, pay_first_installment, postfinance, rf
+):
+    """The same, seen by the return page rather than by a webhook."""
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.PROCESSING
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    payment = first_payment_of(plan)
+    prov = pay_first_installment(installments_event, payment)
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+    postfinance.transaction.state = TransactionState.FAILED
+    request = rf.get("/")
+    request.session = {}
+    prov.sync_payment(request, payment)
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+
+@pytest.mark.django_db
+def test_a_failed_automatic_charge_keeps_the_token(
+    installments_event, installments_order, pay_first_installment, postfinance, webhooks
+):
+    """
+    An automatic charge is made with the plan's own token, so its transaction
+    names it. A decline there (no funds, say) is no reason to drop a token
+    that works, and every later installment would then go uncharged.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    postfinance.decline = "Insufficient funds"
+    assert process_single_installment(due(plan, 2)) is False
+    charge = due(plan, 2).payment
+    assert charge.info_data["installment_charge"] is True
+
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.FAILED
+    webhooks(charge.info_data["transaction_id"])
+
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+
+@pytest.mark.django_db
+def test_a_failed_payment_leaves_a_newer_token_alone(
+    installments_order, postfinance, webhooks
+):
+    """
+    By the time an abandoned payment fails, the customer may have paid with
+    another transaction, whose token replaced its own on the plan.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    awaiting_transaction(plan)
+    plan.store_payment_token({"token_id": 777666})
+
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.FAILED
+    webhooks(123456)
+
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == 777666
 
 
 @pytest.mark.django_db
