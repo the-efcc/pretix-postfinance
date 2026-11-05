@@ -22,6 +22,7 @@ from i18nfield.strings import LazyI18nString
 from postfinancecheckout.models import (
     AddressCreate,
     ChargeState,
+    CreationEntityState,
     CustomersPresence,
     LineItemCreate,
     LineItemType,
@@ -1979,6 +1980,35 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             # Always clean up session, whether success or failure
             self._clear_session_transaction_id(request)
 
+    @staticmethod
+    def _token_is_chargeable(client: PostFinanceClient, token_id: int) -> bool:
+        """
+        Ask PostFinance whether a plan's token can be charged at all.
+
+        Only an active token can. A plan can be left holding one that never
+        will be: a token is stored as soon as a transaction carries it, ahead
+        of authorization, and PostFinance only activates it once the
+        transaction is authorized. A checkout payment that failed before that
+        left its token inactive for good, and every charge against it was
+        refused with "The token defined on the transaction is not active",
+        each one another failed transaction at PostFinance. A token can also
+        stop being active later, deleted or deactivated at PostFinance.
+
+        Charging is the default whenever the answer is not a clear no: if
+        the token cannot be read, or carries no state, the charge goes ahead
+        as it always has, and PostFinance still has the last word.
+        """
+        try:
+            token = client.get_token(token_id)
+        except Exception as e:
+            logger.warning(
+                "Could not read PostFinance token %s, charging it anyway: %s",
+                token_id,
+                e,
+            )
+            return True
+        return token.state is None or token.state == CreationEntityState.ACTIVE
+
     def _installment_token_client(self, plan: Any) -> PostFinanceClient:
         """
         Create a client for the space an installment plan's token lives in.
@@ -2370,6 +2400,21 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     return True
                 return self._fail_installment(
                     installment, payment, reason or "", info
+                )
+
+            if not self._token_is_chargeable(client, token_id):
+                logger.warning(
+                    "Not charging installment %s for order %s: PostFinance token %s "
+                    "is not active",
+                    installment.pk,
+                    plan.order.code,
+                    token_id,
+                )
+                return self._fail_installment(
+                    installment,
+                    payment,
+                    str(_("The saved payment method can no longer be charged.")),
+                    info,
                 )
 
             transaction = client.create_transaction(

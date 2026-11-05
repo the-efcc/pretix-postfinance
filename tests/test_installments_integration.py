@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from django_scopes import scopes_disabled
-from postfinancecheckout.models import ChargeState, TransactionState
+from postfinancecheckout.models import ChargeState, CreationEntityState, TransactionState
 from pretix.base.models import Order, OrderPayment, OrderRefund
 
 pytest.importorskip("pretix.efcc.models", reason="requires pretix with installments")
@@ -595,6 +595,46 @@ def test_first_payment_stores_no_token_when_the_transaction_failed(
 
     plan.refresh_from_db()
     assert plan.payment_token == {}
+
+
+@pytest.mark.django_db
+def test_a_token_postfinance_never_activated_is_not_charged(
+    installments_event, installments_order, pay_first_installment, postfinance, monkeypatch, rf
+):
+    """
+    The customer's checkout payment gets as far as PROCESSING, then fails.
+
+    Its token was stored at PROCESSING, and PostFinance never activated it.
+    Once the checkout payment was dead, pretix charged installment 1 against
+    it automatically -- refused with "The token defined on the transaction is
+    not active", as was every retry, each one another failed transaction at
+    PostFinance.
+    """
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.PROCESSING
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    payment = first_payment_of(plan)
+    prov = pay_first_installment(installments_event, payment)
+
+    postfinance.transaction.state = TransactionState.FAILED
+    request = rf.get("/")
+    request.session = {}
+    prov.sync_payment(request, payment)
+    payment.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.get_token",
+        lambda self, token_id: SimpleNamespace(id=token_id, state=CreationEntityState.CREATE),
+    )
+    assert process_single_installment(due(plan, 1)) is False
+
+    assert postfinance.token_charges() == []
+    installment = due(plan, 1)
+    assert installment.state == ScheduledInstallment.STATE_FAILED
+    assert installment.failure_reason == "The saved payment method can no longer be charged."
 
 
 @pytest.mark.django_db

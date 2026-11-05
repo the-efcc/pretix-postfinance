@@ -460,6 +460,10 @@ msgid "No stored payment method is available for this plan."
 msgstr ""
 "Per questo piano rateale non è disponibile alcun metodo di pagamento salvato."
 
+#: payment.py:2417
+msgid "The saved payment method can no longer be charged."
+msgstr "Non è più possibile addebitare il metodo di pagamento salvato."
+
 #: payment.py:2365
 msgid "PostFinance did not return a transaction reference."
 msgstr "PostFinance non ha restituito alcun riferimento di transazione."

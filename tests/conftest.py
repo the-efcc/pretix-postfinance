@@ -12,7 +12,7 @@ from django.test import RequestFactory
 from django.utils import translation
 from django.utils.timezone import now
 from django_scopes import scopes_disabled
-from postfinancecheckout.models import TransactionState
+from postfinancecheckout.models import CreationEntityState, TransactionState
 from pretix.base.models import Event, Order, Organizer
 
 
@@ -39,6 +39,23 @@ def no_messages(monkeypatch):
 def disable_scopes():
     with scopes_disabled():
         yield
+
+
+@pytest.fixture(autouse=True)
+def active_tokens(request, monkeypatch):
+    """
+    Every token PostFinance is asked about is active, unless a test says not.
+
+    An installment charge reads the plan's token before charging it, and no
+    test should reach the real API for that. `test_api.py` tests the client
+    method itself, against mocked SDK services, so it keeps the real one.
+    """
+    if request.module.__name__.endswith("test_api"):
+        return
+    monkeypatch.setattr(
+        "pretix_postfinance.api.PostFinanceClient.get_token",
+        lambda self, token_id: MagicMock(id=token_id, state=CreationEntityState.ACTIVE),
+    )
 
 
 # Request factory

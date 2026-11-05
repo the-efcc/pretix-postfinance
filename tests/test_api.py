@@ -126,6 +126,34 @@ class TestPostFinanceClient:
             id=123456, space=12345
         )
 
+    def test_get_token_success(self, mock_services):
+        token = MagicMock(id=999888, state="ACTIVE")
+        mock_tokens_instance = MagicMock()
+        mock_tokens_instance.get_payment_tokens_id.return_value = token
+        mock_services["TokensService"].return_value = mock_tokens_instance
+
+        client = PostFinanceClient(space_id=12345, user_id=67890, api_secret="test-secret")
+
+        assert client.get_token(999888) == token
+        mock_tokens_instance.get_payment_tokens_id.assert_called_once_with(
+            id=999888, space=12345
+        )
+
+    def test_get_token_api_exception(self, mock_services):
+        from postfinancecheckout.exceptions import ApiException
+
+        mock_tokens_instance = MagicMock()
+        mock_tokens_instance.get_payment_tokens_id.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        mock_services["TokensService"].return_value = mock_tokens_instance
+
+        client = PostFinanceClient(space_id=12345, user_id=67890, api_secret="test-secret")
+
+        with pytest.raises(PostFinanceError) as exc_info:
+            client.get_token(999888)
+        assert exc_info.value.status_code == 404
+
     def test_get_refund_success(self, mock_services, mock_refund):
         mock_refunds_instance = MagicMock()
         mock_refunds_instance.get_payment_refunds_id.return_value = mock_refund
