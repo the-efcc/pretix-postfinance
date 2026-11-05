@@ -557,21 +557,6 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
                 e,
             )
             return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
-    else:
-        # A token stored from an earlier webhook for this transaction was
-        # never activated, and charging it later would only be refused.
-        try:
-            provider = payment.payment_provider
-            if provider is not None:
-                provider.drop_installment_token(payment, transaction)
-        except Exception as e:
-            logger.exception(
-                "PostFinance webhook: error dropping the installment token of "
-                "payment %s: %s",
-                payment.pk,
-                e,
-            )
-            return (WEBHOOK_STATUS_INTERNAL_ERROR, None)
 
     if payment.state in (
         OrderPayment.PAYMENT_STATE_CONFIRMED,
