@@ -45,6 +45,7 @@ from .payment import (
     RETURN_URL_TAG,
     SPACE_ID_KEY,
     SUCCESS_STATES,
+    TOKEN_ACTIVE_STATES,
     mark_payment_pending,
     mark_refund_done,
     mark_refund_failed,
@@ -543,8 +544,11 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     # otherwise leave its plan permanently unchargeable, because every later
     # webhook returns at that check first. Returning rather than confirming on
     # failure is deliberate: PostFinance retries, and a plan is better served
-    # by another attempt than by a confirmed payment with no token.
-    if transaction_state not in FAILURE_STATES:
+    # by another attempt than by a confirmed payment with no token. Only once
+    # the token is chargeable, though (see TOKEN_ACTIVE_STATES): the CONFIRMED
+    # and PROCESSING webhooks already carry it, inactive, and a transaction
+    # that fails from there leaves it inactive for good.
+    if transaction_state in TOKEN_ACTIVE_STATES:
         try:
             provider = payment.payment_provider
             if provider is not None:

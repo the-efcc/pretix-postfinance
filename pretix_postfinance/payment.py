@@ -67,6 +67,19 @@ FAILURE_STATES = {
     TransactionState.VOIDED,
 }
 
+# PostFinance transaction states at which the transaction's token can be
+# charged. A tokenized transaction carries its token from the moment the
+# customer submits it, but PostFinance only activates the token once the
+# transaction is authorized. Before that (CONFIRMED, PROCESSING) it is still
+# inactive, and if the transaction then fails it stays inactive for good:
+# every charge against it is refused with "The token defined on the
+# transaction is not active".
+TOKEN_ACTIVE_STATES = {
+    TransactionState.AUTHORIZED,
+    TransactionState.COMPLETED,
+    TransactionState.FULFILL,
+}
+
 # Mapping of HTTP status codes to user-friendly error messages
 ERROR_STATUS_MESSAGES = {
     400: _("Bad request. The payment data may be invalid."),
@@ -1856,13 +1869,14 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             )
 
             # A plan's first payment leaves behind the token every later
-            # installment is charged against. The token exists from the moment
-            # the transaction is tokenized, so this is deliberately not gated
+            # installment is charged against. This is deliberately not gated
             # on SUCCESS_STATES: a customer returning while the transaction was
             # still AUTHORIZED used to leave the plan with no token at all, and
-            # nothing later could repair it. Only a failed transaction has no
-            # token worth keeping.
-            if state not in FAILURE_STATES:
+            # nothing later could repair it. But it is gated on the token being
+            # chargeable: one stored from a transaction that was still
+            # PROCESSING, and then failed, is never activated, and the plan
+            # would go on charging it.
+            if state in TOKEN_ACTIVE_STATES:
                 self.store_installment_token(payment, transaction)
 
             if state in SUCCESS_STATES:

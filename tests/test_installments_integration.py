@@ -23,6 +23,7 @@ pytest.importorskip("pretix.efcc.models", reason="requires pretix with installme
 from pretix.base.services.installments import (
     cancel_installment_plan,
     create_installment_plan,
+    due_installments_queryset,
     process_single_installment,
 )
 from pretix.efcc.models import InstallmentPlan, ScheduledInstallment
@@ -569,6 +570,74 @@ def test_first_payment_stores_no_token_when_the_transaction_failed(
 
     plan.refresh_from_db()
     assert plan.payment_token == {}
+
+
+@pytest.mark.parametrize(
+    "state", [TransactionState.CONFIRMED, TransactionState.PROCESSING]
+)
+@pytest.mark.django_db
+def test_first_payment_stores_no_token_before_it_is_authorized(
+    state, installments_event, installments_order, pay_first_installment, postfinance
+):
+    """
+    The transaction already carries its token here, but PostFinance has not
+    activated it, and every charge against it would be refused.
+    """
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = state
+
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+
+@pytest.mark.django_db
+def test_a_first_payment_that_fails_after_processing_leaves_no_token_to_charge(
+    installments_event, installments_order, monkeypatch, postfinance
+):
+    """
+    The customer's checkout payment gets as far as PROCESSING, then fails.
+
+    Its token was never activated. Stored from the PROCESSING webhook, it
+    stayed on the plan, and once the checkout payment was dead pretix charged
+    installment 1 against it automatically -- a charge PostFinance refuses
+    with "The token defined on the transaction is not active", as does every
+    retry, until the plan's grace period runs out.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    payment = first_payment_of(plan)
+    payment.info_data = {"transaction_id": 123456, "space_id": "12345"}
+    payment.save(update_fields=["info"])
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.PROCESSING
+    with scopes_disabled():
+        _process_transaction_webhook(123456, 12345)
+    plan.refresh_from_db()
+    assert plan.payment_token == {}
+
+    postfinance.transaction.state = TransactionState.FAILED
+    with scopes_disabled():
+        _process_transaction_webhook(123456, 12345)
+    payment.refresh_from_db()
+    assert payment.state == OrderPayment.PAYMENT_STATE_FAILED
+
+    # With the checkout payment dead, installment 1 is pretix's to charge, and
+    # there is no inactive token for it to be charged against.
+    with scopes_disabled():
+        assert due_installments_queryset().filter(pk=due(plan, 1).pk).exists()
+    assert process_single_installment(due(plan, 1)) is False
+    assert postfinance.token_charges() == []
+    assert due(plan, 1).failure_reason == "No payment token available"
 
 
 @pytest.mark.django_db

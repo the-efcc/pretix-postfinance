@@ -1296,9 +1296,9 @@ class TestWebhookConcurrentWrites:
             other.confirm()
 
     @staticmethod
-    def _processing_transaction() -> MagicMock:
+    def _processing_transaction(state=TransactionState.PROCESSING) -> MagicMock:
         mock_transaction = MagicMock()
-        mock_transaction.state = TransactionState.PROCESSING
+        mock_transaction.state = state
         mock_transaction.payment_connector_configuration = MagicMock()
         mock_transaction.payment_connector_configuration.name = "Visa"
         return mock_transaction
@@ -1371,12 +1371,15 @@ class TestWebhookConcurrentWrites:
         The handler's copy still reads `created` here, so only a transition
         conditional on the stored state keeps it from being reverted to
         pending.
+
+        AUTHORIZED, because it is the one state that both stores the token
+        (see TOKEN_ACTIVE_STATES) and then takes the pending path.
         """
         event, order = webhook_env
         order.status = Order.STATUS_PENDING
         order.save()
         payment = self._created_payment(order)
-        mock_transaction = self._processing_transaction()
+        mock_transaction = self._processing_transaction(TransactionState.AUTHORIZED)
 
         monkeypatch.setattr(
             "pretix_postfinance.views.PostFinanceClient.get_transaction",
@@ -1399,7 +1402,7 @@ class TestWebhookConcurrentWrites:
         assert order.status == Order.STATUS_PAID
         assert payment.info_data["token_id"] == "tok-other"
         assert payment.info_data["transaction_id"] == 123456
-        assert payment.info_data["state"] == "PROCESSING"
+        assert payment.info_data["state"] == "AUTHORIZED"
 
     @pytest.mark.django_db
     def test_created_payment_still_moves_to_pending(
