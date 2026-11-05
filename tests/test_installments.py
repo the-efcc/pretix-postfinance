@@ -18,7 +18,7 @@ import pytest
 from postfinancecheckout.models import ChargeState, TransactionState
 
 from pretix_postfinance.api import PostFinanceError
-from pretix_postfinance.payment import PostFinancePaymentProvider
+from pretix_postfinance.payment import PostFinancePaymentProvider, localized_text
 
 
 @pytest.fixture
@@ -647,3 +647,26 @@ def test_decline_without_a_reason_falls_back_to_our_wording(
     assert prov.execute_installment(plan, installment, payment) is False
 
     assert installment.failure_reason == "The payment was declined by PostFinance."
+
+
+@pytest.mark.parametrize(
+    ("value", "locale", "expected"),
+    [
+        # The order's language, whatever the region PostFinance tags it with.
+        ({"en-US": "Declined", "de-CH": "Abgelehnt"}, "de", "Abgelehnt"),
+        ({"en-US": "Declined", "de-CH": "Abgelehnt"}, "de-informal", "Abgelehnt"),
+        ({"en-US": "Declined", "fr-CH": "Refusé"}, "fr-CH", "Refusé"),
+        # English when PostFinance has nothing in the order's language.
+        ({"en-US": "Declined", "de-CH": "Abgelehnt"}, "it", "Declined"),
+        ({"en-US": "Declined"}, None, "Declined"),
+        # Then whatever it did send.
+        ({"de-CH": "Abgelehnt"}, "it", "Abgelehnt"),
+        # A plain string passes through; nothing at all stays nothing.
+        ("Insufficient funds", "de", "Insufficient funds"),
+        ({}, "de", None),
+        ({"en-US": ""}, "de", None),
+        (None, "de", None),
+    ],
+)
+def test_localized_text(value, locale, expected):
+    assert localized_text(value, locale) == expected
