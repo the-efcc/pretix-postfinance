@@ -56,6 +56,16 @@ class PostFinanceRefundFailedLogEntryType(OrderLogEntryType):
         return _("PostFinance refund failed: {error}.").format(error=error)
 
 
+@log_entry_types.new()
+class PostFinanceRefundUnknownLogEntryType(OrderLogEntryType):
+    action_type = "pretix_postfinance.refund.unknown"
+
+    def display(self, logentry, data):
+        return _(
+            "PostFinance did not confirm whether the refund was created: {error}."
+        ).format(error=data.get("error"))
+
+
 @receiver(register_payment_providers, dispatch_uid="payment_postfinance")
 def register_payment_provider(sender: Any, **kwargs: Any) -> list[type[Any]]:
     """

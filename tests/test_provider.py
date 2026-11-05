@@ -562,6 +562,84 @@ def test_refund_api_error(env, rf, monkeypatch):
 
 
 @pytest.mark.django_db
+def test_a_refund_postfinance_did_not_confirm_stays_created(env, rf, monkeypatch):
+    """
+    Reported failed, the refund's amount would be refundable again, and
+    refunding it again would pay the customer twice if the first one went
+    through.
+    """
+    event, order = env
+
+    def unconfirmed(self, **kwargs):
+        raise PostFinanceError("Read timed out", connection_error=True, outcome_unknown=True)
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.refund_transaction", unconfirmed
+    )
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_CREATED,
+    )
+
+    PostFinancePaymentProvider(event).execute_refund(refund)
+
+    refund.refresh_from_db()
+    external_id = f"pretix-dummy-dummy-{order.code}-R-{refund.local_id}"
+    assert refund.state == OrderRefund.REFUND_STATE_CREATED
+    assert refund.info_data["external_id"] == external_id
+    assert refund.info_data["error"] == "Read timed out"
+    assert payment.refunded_amount == order.total
+    assert not order.all_logentries().filter(action_type="pretix_postfinance.refund.failed")
+    unknown = order.all_logentries().get(action_type="pretix_postfinance.refund.unknown")
+    assert "did not confirm" in str(unknown.display())
+
+    rendered = PostFinancePaymentProvider(event).refund_control_render(rf.get("/"), refund)
+    assert "did not confirm" in rendered
+    assert external_id in rendered
+
+
+@pytest.mark.django_db
+def test_the_external_id_is_saved_before_the_refund_is_sent(env, monkeypatch, refund_factory):
+    event, order = env
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(provider="postfinance", amount=order.total, payment=payment)
+    saved_when_sent = []
+
+    def record(self, **kwargs):
+        saved_when_sent.append(OrderRefund.objects.get(pk=refund.pk).info_data.get("external_id"))
+        assert saved_when_sent[0] == kwargs["external_id"]
+        return refund_factory(state="PENDING")
+
+    monkeypatch.setattr("pretix_postfinance.payment.PostFinanceClient.refund_transaction", record)
+
+    PostFinancePaymentProvider(event).execute_refund(refund)
+
+    refund.refresh_from_db()
+    assert saved_when_sent == [refund.info_data["external_id"]]
+    assert refund.info_data["refund_id"] == 789012
+
+
+@pytest.mark.django_db
+def test_an_unconfirmed_refund_settled_by_the_admin_shows_no_hint(env, rf):
+    event, order = env
+    payment = _refundable_payment(order)
+    refund = order.refunds.create(
+        provider="postfinance",
+        amount=order.total,
+        payment=payment,
+        state=OrderRefund.REFUND_STATE_DONE,
+        info=json.dumps({"external_id": "pretix-dummy-dummy-X-R-1", "error": "Read timed out"}),
+    )
+
+    rendered = PostFinancePaymentProvider(event).refund_control_render(rf.get("/"), refund)
+
+    assert "did not confirm" not in rendered
+
+
+@pytest.mark.django_db
 def test_refund_wrong_state(env, rf):
     event, order = env
 
@@ -935,6 +1013,7 @@ def test_shred_refund_info_keeps_external_references(env):
         info=json.dumps(
             {
                 "refund_id": 789012,
+                "external_id": "pretix-dummy-dummy-FOOBAR-R-1",
                 "state": "SUCCESSFUL",
                 "amount": 13.37,
                 "created_on": "2026-01-13T11:00:00Z",
@@ -947,6 +1026,7 @@ def test_shred_refund_info_keeps_external_references(env):
     refund.refresh_from_db()
     info = refund.info_data
     assert info.get("refund_id") == 789012
+    assert info.get("external_id") == "pretix-dummy-dummy-FOOBAR-R-1"
     assert info.get("state") == "SUCCESSFUL"
     assert info.get("amount") == 13.37
     assert info.get("_shredded") is True
