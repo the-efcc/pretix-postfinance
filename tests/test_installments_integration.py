@@ -658,7 +658,7 @@ def test_a_first_payment_that_fails_after_processing_leaves_no_token_to_charge(
         assert due_installments_queryset().filter(pk=due(plan, 1).pk).exists()
     assert process_single_installment(due(plan, 1)) is False
     assert postfinance.token_charges() == []
-    assert due(plan, 1).failure_reason == "No payment token available"
+    assert due(plan, 1).failure_reason == "No saved payment method is available."
 
 
 @pytest.mark.django_db
@@ -833,7 +833,7 @@ def test_missing_token_leaves_the_plan_chargeable_by_hand(
     # pretix's own wording, not the provider's: with no token on the plan it
     # never gets as far as calling `execute_installment()`. The provider's
     # reason for the same situation is covered in `test_installments.py`.
-    assert installment.failure_reason == "No payment token available"
+    assert installment.failure_reason == "No saved payment method is available."
 
 
 @pytest.mark.django_db
