@@ -683,6 +683,37 @@ def test_a_customer_returning_from_a_failed_payment_takes_the_token_back(
     assert plan.payment_token == {}
 
 
+@pytest.mark.parametrize(
+    ("state", "kept"),
+    [
+        # Authorized and then released unused: the token is active and can
+        # still be charged.
+        (TransactionState.VOIDED, True),
+        # Authorized, then refused at PostFinance's delivery decision: not a
+        # payment method to go on charging.
+        (TransactionState.DECLINE, False),
+    ],
+)
+@pytest.mark.django_db
+def test_a_payment_that_fails_after_authorization(
+    state, kept, installments_order, postfinance, webhooks
+):
+    plan = create_installment_plan(installments_order, "postfinance", 2)
+    awaiting_transaction(plan)
+
+    postfinance.transaction = fulfilled_transaction()
+    postfinance.transaction.state = TransactionState.AUTHORIZED
+    webhooks(123456)
+    plan.refresh_from_db()
+    assert plan.payment_token["token_id"] == TOKEN_ID
+
+    postfinance.transaction.state = state
+    webhooks(123456)
+
+    plan.refresh_from_db()
+    assert (plan.payment_token.get("token_id") == TOKEN_ID) is kept
+
+
 @pytest.mark.django_db
 def test_a_failed_automatic_charge_keeps_the_token(
     installments_event, installments_order, pay_first_installment, postfinance, webhooks

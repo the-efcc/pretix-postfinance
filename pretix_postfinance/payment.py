@@ -68,6 +68,14 @@ FAILURE_STATES = {
 }
 
 
+# Failure states after which a customer-paid transaction's token is dropped
+# from its plan (see `drop_installment_token`). VOIDED is deliberately not one.
+DEAD_TOKEN_STATES = {
+    TransactionState.FAILED,
+    TransactionState.DECLINE,
+}
+
+
 def localized_text(value: Any, locale: str | None) -> str | None:
     """
     Pick one language out of a text PostFinance sends in several.
@@ -2097,12 +2105,22 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         charge refused with "The token defined on the transaction is not
         active", until the plan's grace period ran out.
 
+        On FAILED and DECLINE, not VOIDED. FAILED is reached without the
+        transaction ever being authorized. DECLINE comes after authorization,
+        but it is PostFinance refusing the payment at its delivery decision,
+        and a payment method refused there is not one to go on charging.
+        VOIDED is an authorized transaction released unused: its token is
+        active and still chargeable, and dropping it would cost the plan a
+        charge it could have made.
+
         Only the token this transaction produced is removed, and only while it
         is still the plan's: a later payment may have replaced it with one that
         works. An automatic charge failing says nothing about the token it was
         made with (it may have been declined for want of funds), so those are
         left alone entirely.
         """
+        if getattr(transaction, "state", None) not in DEAD_TOKEN_STATES:
+            return
         if scheduled_installment_for_payment(payment) is None:
             return
         if (payment.info_data or {}).get(INSTALLMENT_CHARGE_KEY):
