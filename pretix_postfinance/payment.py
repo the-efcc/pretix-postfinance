@@ -67,6 +67,38 @@ FAILURE_STATES = {
     TransactionState.VOIDED,
 }
 
+
+def localized_text(value: Any, locale: str | None) -> str | None:
+    """
+    Pick one language out of a text PostFinance sends in several.
+
+    PostFinance returns texts such as a decline reason as a mapping of
+    language tag to text, ``{"en-US": "The token ... is not active."}``.
+    Turned into a string as is, that mapping is what the customer and the
+    organizer would read. Prefer the order's language, then English, then
+    whatever PostFinance sent.
+    """
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        return str(value)
+    texts: dict[str, str] = {
+        str(tag).lower().replace("_", "-"): str(text) for tag, text in value.items() if text
+    }
+    if not texts:
+        return None
+    wanted = str(locale or "").lower().replace("_", "-")
+    for candidate in (wanted, wanted.split("-")[0], "en"):
+        if not candidate:
+            continue
+        if candidate in texts:
+            return texts[candidate]
+        for tag, text in texts.items():
+            if tag.split("-")[0] == candidate:
+                return text
+    return next(iter(texts.values()))
+
+
 # Mapping of HTTP status codes to user-friendly error messages
 ERROR_STATUS_MESSAGES = {
     400: _("Bad request. The payment data may be invalid."),
@@ -2406,7 +2438,9 @@ class PostFinancePaymentProvider(BasePaymentProvider):
             if charge_state == ChargeState.FAILED:
                 failure_reason = None
                 if charge.failure_reason:
-                    failure_reason = charge.failure_reason.description
+                    failure_reason = localized_text(
+                        charge.failure_reason.description, plan.order.locale
+                    )
                 logger.warning(
                     "Installment %s for order %s failed (PostFinance charge state: %s, "
                     "reason: %s)",
