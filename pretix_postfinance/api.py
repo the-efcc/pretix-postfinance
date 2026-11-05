@@ -26,7 +26,6 @@ from postfinancecheckout.models import (
     RefundState,
     RefundType,
     Space,
-    Token,
     TokenizationMode,
     Transaction,
     TransactionCreate,
@@ -796,35 +795,6 @@ class PostFinanceClient:
             logger.info("Created refund listener with ID %s", refund_listener.id)
 
         return result
-
-    def get_token(self, token_id: int) -> Token:
-        """
-        Retrieve a payment token, its state included.
-
-        Args:
-            token_id: The ID of the token to retrieve.
-
-        Returns:
-            The Token object.
-
-        Raises:
-            PostFinanceError: If the request fails.
-        """
-        try:
-            return self._tokens_service.get_payment_tokens_id(
-                id=token_id,
-                space=self.space_id,
-            )
-        except ApiException as e:
-            logger.error("PostFinance API error retrieving token %s: %s", token_id, e)
-            raise PostFinanceError(
-                message=str(e),
-                status_code=e.status,
-                error_code=str(e.status),
-            ) from e
-        except PostFinanceCheckoutSdkException as e:
-            logger.error("PostFinance SDK error retrieving token %s: %s", token_id, e)
-            raise PostFinanceError(message=str(e)) from e
 
     def delete_token(self, token_id: int) -> None:
         """

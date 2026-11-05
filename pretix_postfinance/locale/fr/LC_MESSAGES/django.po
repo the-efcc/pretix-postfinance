@@ -463,10 +463,6 @@ msgid "No stored payment method is available for this plan."
 msgstr ""
 "Aucun moyen de paiement enregistré n'est disponible pour cet échéancier."
 
-#: payment.py:2417
-msgid "The saved payment method can no longer be charged."
-msgstr "Le moyen de paiement enregistré ne peut plus être débité."
-
 #: payment.py:2365
 msgid "PostFinance did not return a transaction reference."
 msgstr "PostFinance n'a pas renvoyé de référence de transaction."

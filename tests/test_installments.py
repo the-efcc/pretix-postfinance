@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from postfinancecheckout.models import ChargeState, CreationEntityState, TransactionState
+from postfinancecheckout.models import ChargeState, TransactionState
 
 from pretix_postfinance.api import PostFinanceError
 from pretix_postfinance.payment import PostFinancePaymentProvider, localized_text
@@ -139,67 +139,6 @@ def test_execute_installment_charges_event_currency(
     assert create["line_items"][0].amount_including_tax == 100.00
     assert create["merchant_reference"] == f"{chf_event.slug}-{order.code}-inst-2"
     assert installment.failure_reason is None
-
-
-def token_state(monkeypatch, state):
-    """Have PostFinance report the plan's token in `state`."""
-    monkeypatch.setattr(
-        "pretix_postfinance.payment.PostFinanceClient.get_token",
-        lambda self, token_id: SimpleNamespace(id=token_id, state=state),
-    )
-
-
-@pytest.mark.parametrize(
-    "state",
-    [
-        # Stored from a transaction that failed before it was authorized,
-        # and so never activated.
-        CreationEntityState.CREATE,
-        CreationEntityState.INACTIVE,
-        CreationEntityState.DELETING,
-        CreationEntityState.DELETED,
-    ],
-)
-@pytest.mark.django_db
-def test_a_token_that_is_not_active_is_not_charged(
-    state, chf_event, order, monkeypatch, charge_calls
-):
-    """
-    PostFinance would refuse the charge anyway ("The token defined on the
-    transaction is not active"), and each attempt would leave another failed
-    transaction behind. The token stays on the plan: it is not ours to
-    decide it will never become usable.
-    """
-    token_state(monkeypatch, state)
-    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
-    installment = make_installment(plan)
-    payment = make_payment(order)
-
-    prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment, payment) is False
-
-    assert "create" not in charge_calls
-    assert installment.failure_reason == "The saved payment method can no longer be charged."
-    assert payment.info_data["error"] == installment.failure_reason
-    assert plan.payment_token["token_id"] == STORED_TOKEN["token_id"]
-
-
-@pytest.mark.django_db
-def test_a_token_that_cannot_be_read_is_charged_anyway(
-    chf_event, order, monkeypatch, charge_calls
-):
-    """Only a clear "not active" stops a charge; PostFinance has the last word."""
-
-    def unreachable(self, token_id):
-        raise PostFinanceError("gateway timeout", status_code=504)
-
-    monkeypatch.setattr("pretix_postfinance.payment.PostFinanceClient.get_token", unreachable)
-    successful_charge(monkeypatch)
-    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
-
-    prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, make_installment(plan), make_payment(order)) is True
-    assert charge_calls["create"]["token"] == STORED_TOKEN["token_id"]
 
 
 @pytest.mark.django_db
@@ -605,7 +544,6 @@ TRANSLATABLE_FAILURE_REASONS = (
     "No stored payment method is available for this plan.",
     "PostFinance did not return a transaction reference.",
     "The payment was declined by PostFinance.",
-    "The saved payment method can no longer be charged.",
     "The payment did not complete (PostFinance state: {state}).",
     "The payment did not complete.",
 )

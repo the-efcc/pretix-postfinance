@@ -465,10 +465,6 @@ msgstr "Un intento de pago anterior aún se está procesando."
 msgid "No stored payment method is available for this plan."
 msgstr "No hay ningún método de pago guardado disponible para este plan."
 
-#: payment.py:2417
-msgid "The saved payment method can no longer be charged."
-msgstr "Ya no es posible cargar el método de pago guardado."
-
 #: payment.py:2365
 msgid "PostFinance did not return a transaction reference."
 msgstr "PostFinance no devolvió ninguna referencia de transacción."
