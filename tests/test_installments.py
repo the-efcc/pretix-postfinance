@@ -50,7 +50,13 @@ def make_plan(event, order, *, token=None, total_installments=3):
 
 def make_payment(order, *, amount="100.00"):
     """A stand-in for the `created` OrderPayment pretix hands the provider."""
-    return SimpleNamespace(pk=7, order=order, amount=Decimal(amount), info_data={})
+    payment = SimpleNamespace(
+        pk=7, order=order, amount=Decimal(amount), info_data={}, saved_info=None
+    )
+    payment.save = lambda update_fields: setattr(
+        payment, "saved_info", dict(payment.info_data)
+    )
+    return payment
 
 
 def make_installment(plan, *, number=2, amount="100.00"):
@@ -413,12 +419,13 @@ def test_execute_installment_records_charge_failure(
 
 
 @pytest.mark.django_db
-def test_execute_installment_records_pending_charge_as_failure(
+def test_execute_installment_reports_pending_charge_as_undecided(
     chf_event, order, monkeypatch, charge_calls
 ):
     """
-    A charge that is neither successful nor failed has not moved money, so
-    pretix must not be told the installment is paid.
+    A charge that is neither successful nor failed may still move money, so
+    pretix is told neither "paid" nor "declined": a decline would have the
+    customer pay again on the recovery page while this one goes through.
     """
     monkeypatch.setattr(
         "pretix_postfinance.payment.PostFinanceClient.process_with_token",
@@ -433,10 +440,36 @@ def test_execute_installment_records_pending_charge_as_failure(
     payment = make_payment(order)
 
     prov = PostFinancePaymentProvider(chf_event)
-    assert prov.execute_installment(plan, installment, payment) is False
-    assert installment.failure_reason == (
-        "The payment did not complete (PostFinance state: PENDING)."
+    assert prov.execute_installment(plan, installment, payment) is None
+    assert installment.failure_reason is None
+    assert payment.info_data["transaction_id"] == 234567
+
+
+@pytest.mark.django_db
+def test_execute_installment_saves_the_transaction_before_charging(
+    chf_event, order, monkeypatch, charge_calls
+):
+    """
+    A process killed during the charge never gets to report back, so the
+    transaction has to be in the database before the money moves -- it is
+    what the next attempt checks before charging again.
+    """
+    saved_before_charge = {}
+
+    def charge(self, tid):
+        saved_before_charge.update(payment.saved_info or {})
+        raise SystemExit("worker killed")
+
+    monkeypatch.setattr(
+        "pretix_postfinance.payment.PostFinanceClient.process_with_token", charge
     )
+    plan = make_plan(chf_event, order, token=dict(STORED_TOKEN))
+    installment = make_installment(plan)
+    payment = make_payment(order)
+
+    with pytest.raises(SystemExit):
+        PostFinancePaymentProvider(chf_event).execute_installment(plan, installment, payment)
+    assert saved_before_charge["transaction_id"] == 234567
 
 
 @pytest.mark.django_db
@@ -544,8 +577,6 @@ TRANSLATABLE_FAILURE_REASONS = (
     "No stored payment method is available for this plan.",
     "PostFinance did not return a transaction reference.",
     "The payment was declined by PostFinance.",
-    "The payment did not complete (PostFinance state: {state}).",
-    "The payment did not complete.",
 )
 
 
