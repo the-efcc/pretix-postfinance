@@ -6,7 +6,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: pretix-postfinance\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-10 13:08+0000\n"
+"POT-Creation-Date: 2026-11-06 11:14+0000\n"
 "PO-Revision-Date: 2026-08-26 16:32+0000\n"
 "Last-Translator: pretix-postfinance contributors\n"
 "Language-Team: Italian\n"
@@ -28,54 +28,54 @@ msgstr "Plugin di pagamento PostFinance Checkout per pretix"
 msgid "Payment"
 msgstr "Pagamento"
 
-#: payment.py:72
+#: payment.py:104
 msgid "Bad request. The payment data may be invalid."
 msgstr ""
 "Richiesta non valida. I dati di pagamento potrebbero non essere validi."
 
-#: payment.py:73
+#: payment.py:105
 msgid "Authentication failed. Check your User ID and API Secret in settings."
 msgstr ""
 "Autenticazione non riuscita. Controllare l'ID utente e il secret API nelle "
 "impostazioni."
 
-#: payment.py:74
+#: payment.py:106
 msgid "Access denied. Your API credentials may lack required permissions."
 msgstr ""
 "Accesso negato. Le credenziali API potrebbero non avere i permessi necessari."
 
-#: payment.py:75
+#: payment.py:107
 msgid "Resource not found. The transaction or space ID may be invalid."
 msgstr ""
 "Risorsa non trovata. L'ID della transazione o dello spazio potrebbe non "
 "essere valido."
 
-#: payment.py:76
+#: payment.py:108
 msgid "Conflict. The transaction may have already been processed."
 msgstr "Conflitto. La transazione potrebbe essere già stata elaborata."
 
-#: payment.py:77
+#: payment.py:109
 msgid "Invalid request. Check the payment amount and currency."
 msgstr "Richiesta non valida. Controllare l'importo e la valuta del pagamento."
 
-#: payment.py:78
+#: payment.py:110
 msgid "Rate limited. Too many requests to PostFinance API."
 msgstr ""
 "Limite di richieste raggiunto. Troppe richieste all'API di PostFinance."
 
-#: payment.py:79
+#: payment.py:111
 msgid "PostFinance server error. Please try again later."
 msgstr "Errore del server PostFinance. Riprovare più tardi."
 
-#: payment.py:80
+#: payment.py:112
 msgid "PostFinance gateway error. Please try again later."
 msgstr "Errore del gateway PostFinance. Riprovare più tardi."
 
-#: payment.py:81
+#: payment.py:113
 msgid "PostFinance service unavailable. Please try again later."
 msgstr "Servizio PostFinance non disponibile. Riprovare più tardi."
 
-#: payment.py:454
+#: payment.py:486
 msgid ""
 "Test mode is enabled. Payments will use your test credentials and no real "
 "charges will be made. Configure test credentials in the payment settings."
@@ -84,7 +84,7 @@ msgstr ""
 "verrà addebitato alcun importo reale. Configurare le credenziali di test "
 "nelle impostazioni di pagamento."
 
-#: payment.py:461
+#: payment.py:493
 msgid ""
 "Test mode is enabled but no test credentials are configured. Payments will "
 "use your live credentials. Configure separate test credentials in the "
@@ -94,21 +94,21 @@ msgstr ""
 "pagamenti useranno le credenziali di produzione. Configurare credenziali di "
 "test separate nelle impostazioni di pagamento per evitare addebiti reali."
 
-#: payment.py:573
+#: payment.py:605
 #, python-brace-format
 msgid "{name} (test space)"
 msgstr "{name} (spazio di test)"
 
-#: payment.py:657
+#: payment.py:689
 #, python-brace-format
 msgid "Configuration {id} (name unavailable)"
 msgstr "Configurazione {id} (nome non disponibile)"
 
-#: payment.py:714
+#: payment.py:746
 msgid "Display name"
 msgstr "Nome visualizzato"
 
-#: payment.py:716
+#: payment.py:748
 msgid ""
 "Custom name shown to customers during checkout. Leave empty to use the "
 "default name 'PostFinance'."
@@ -116,11 +116,11 @@ msgstr ""
 "Nome personalizzato mostrato ai clienti durante l'ordine. Lasciare vuoto per "
 "usare il nome predefinito «PostFinance»."
 
-#: payment.py:726
+#: payment.py:758
 msgid "Description"
 msgstr "Descrizione"
 
-#: payment.py:728
+#: payment.py:760
 msgid ""
 "Custom description shown on the checkout page. Leave empty to use the "
 "default message."
@@ -128,11 +128,11 @@ msgstr ""
 "Descrizione personalizzata mostrata nella pagina dell'ordine. Lasciare vuoto "
 "per usare il messaggio predefinito."
 
-#: payment.py:739 payment.py:882
+#: payment.py:771 payment.py:914
 msgid "Space ID"
 msgstr "ID spazio"
 
-#: payment.py:741
+#: payment.py:773
 msgid ""
 "Your PostFinance Checkout space ID. You can find it next to your space name "
 "in your PostFinance Checkout account."
@@ -140,11 +140,11 @@ msgstr ""
 "L'ID dello spazio PostFinance Checkout. Si trova accanto al nome dello "
 "spazio nell'account PostFinance Checkout."
 
-#: payment.py:751 payment.py:884
+#: payment.py:783 payment.py:916
 msgid "User ID"
 msgstr "ID utente"
 
-#: payment.py:753
+#: payment.py:785
 msgid ""
 "Your PostFinance Checkout application user ID. Create an application user in "
 "your PostFinance Checkout account under Account > Users > Application Users."
@@ -153,11 +153,11 @@ msgstr ""
 "applicativo nell'account PostFinance Checkout in Account > Utenti > Utenti "
 "applicativi."
 
-#: payment.py:763 payment.py:886
+#: payment.py:795 payment.py:918
 msgid "Authentication key"
 msgstr "Chiave di autenticazione"
 
-#: payment.py:765
+#: payment.py:797
 msgid ""
 "The authentication key for your application user. This is shown only once "
 "when creating the application user."
@@ -165,11 +165,11 @@ msgstr ""
 "La chiave di autenticazione dell'utente applicativo. Viene mostrata una sola "
 "volta, al momento della creazione dell'utente applicativo."
 
-#: payment.py:774
+#: payment.py:806
 msgid "Test space ID"
 msgstr "ID spazio di test"
 
-#: payment.py:776
+#: payment.py:808
 msgid ""
 "Space ID for test mode. When the event is in test mode and this is "
 "configured, payments will use test credentials. Leave empty to use live "
@@ -179,31 +179,31 @@ msgstr ""
 "questo campo è compilato, i pagamenti usano le credenziali di test. Lasciare "
 "vuoto per usare le credenziali di produzione in modalità test."
 
-#: payment.py:786 payment.py:890
+#: payment.py:818 payment.py:922
 msgid "Test user ID"
 msgstr "ID utente di test"
 
-#: payment.py:788
+#: payment.py:820
 msgid "User ID for test mode. Required if Test space ID is set."
 msgstr ""
 "ID utente per la modalità test. Obbligatorio se è impostato un ID spazio di "
 "test."
 
-#: payment.py:796 payment.py:892
+#: payment.py:828 payment.py:924
 msgid "Test authentication key"
 msgstr "Chiave di autenticazione di test"
 
-#: payment.py:798
+#: payment.py:830
 msgid "Authentication key for test mode. Required if Test space ID is set."
 msgstr ""
 "Chiave di autenticazione per la modalità test. Obbligatoria se è impostato "
 "un ID spazio di test."
 
-#: payment.py:806
+#: payment.py:838
 msgid "Offer the production space in test mode"
 msgstr "Offrire lo spazio di produzione in modalità test"
 
-#: payment.py:808
+#: payment.py:840
 msgid ""
 "While the event is in test mode, offer a second payment option that charges "
 "through your production space, so it can be verified end-to-end before going "
@@ -218,11 +218,11 @@ msgstr ""
 "modalità test. Richiede credenziali di test; senza di esse la modalità test "
 "usa già lo spazio di produzione."
 
-#: payment.py:828
+#: payment.py:860
 msgid "Allowed payment methods"
 msgstr "Metodi di pagamento consentiti"
 
-#: payment.py:830
+#: payment.py:862
 msgid ""
 "Select which payment methods are available to customers. Leave empty to "
 "allow all payment methods. Save your credentials first to see available "
@@ -232,11 +232,11 @@ msgstr ""
 "Lasciare vuoto per consentirli tutti. Salvare prima le credenziali per "
 "vedere le opzioni disponibili."
 
-#: payment.py:842
+#: payment.py:874
 msgid "Alternative payment currency"
 msgstr "Valuta di pagamento alternativa"
 
-#: payment.py:844
+#: payment.py:876
 #, python-brace-format
 msgid ""
 "Offer customers the choice to be charged in this currency instead of "
@@ -249,15 +249,15 @@ msgstr ""
 "fatture, rimborsi) in {currency}; viene convertito solo l'addebito inviato a "
 "PostFinance. Richiede un tasso di cambio qui sotto."
 
-#: payment.py:849
+#: payment.py:881
 msgid "None"
 msgstr "Nessuna"
 
-#: payment.py:861
+#: payment.py:893
 msgid "Exchange rate"
 msgstr "Tasso di cambio"
 
-#: payment.py:863
+#: payment.py:895
 #, python-brace-format
 msgid ""
 "How much customers are charged in the alternative currency per 1 {currency}. "
@@ -269,7 +269,7 @@ msgstr ""
 "i relativi rimborsi. Prevedere un piccolo margine per coprire le "
 "fluttuazioni del cambio."
 
-#: payment.py:896
+#: payment.py:928
 #, python-brace-format
 msgid ""
 "The following fields are required to enable this payment provider: {fields}"
@@ -277,14 +277,14 @@ msgstr ""
 "I seguenti campi sono obbligatori per attivare questo fornitore di "
 "pagamento: {fields}"
 
-#: payment.py:922
+#: payment.py:954
 msgid ""
 "An exchange rate is required when an alternative payment currency is set."
 msgstr ""
 "È necessario un tasso di cambio quando è impostata una valuta di pagamento "
 "alternativa."
 
-#: payment.py:1021
+#: payment.py:1053
 msgid ""
 "Please configure test space ID, user ID, and authentication key before "
 "testing the connection."
@@ -292,7 +292,7 @@ msgstr ""
 "Configurare l'ID dello spazio di test, l'ID utente e la chiave di "
 "autenticazione prima di testare la connessione."
 
-#: payment.py:1030
+#: payment.py:1062
 msgid ""
 "Please configure Space ID, user ID, and authentication key before testing "
 "the connection."
@@ -300,42 +300,42 @@ msgstr ""
 "Configurare l'ID dello spazio, l'ID utente e la chiave di autenticazione "
 "prima di testare la connessione."
 
-#: payment.py:1039
+#: payment.py:1071
 msgid "Unknown"
 msgstr "Sconosciuto"
 
-#: payment.py:1040
+#: payment.py:1072
 msgid "test"
 msgstr "di test"
 
-#: payment.py:1040
+#: payment.py:1072
 msgid "live"
 msgstr "di produzione"
 
-#: payment.py:1045
+#: payment.py:1077
 #, python-brace-format
 msgid "Connection successful! Connected to {mode} space: {space_name}"
 msgstr "Connessione riuscita! Connesso allo spazio {mode}: {space_name}"
 
-#: payment.py:1053
+#: payment.py:1085
 msgid "Authentication failed. Please check your User ID and API Secret."
 msgstr "Autenticazione non riuscita. Controllare l'ID utente e il secret API."
 
-#: payment.py:1058
+#: payment.py:1090
 msgid "Space not found. Please check your Space ID."
 msgstr "Spazio non trovato. Controllare l'ID dello spazio."
 
-#: payment.py:1060
+#: payment.py:1092
 #, python-brace-format
 msgid "Connection failed: {error}"
 msgstr "Connessione non riuscita: {error}"
 
-#: payment.py:1062
+#: payment.py:1094
 #, python-brace-format
 msgid "Unexpected error: {error}"
 msgstr "Errore imprevisto: {error}"
 
-#: payment.py:1081
+#: payment.py:1113
 msgid ""
 "Please configure test space ID, user ID, and authentication key before "
 "setting up webhooks."
@@ -343,7 +343,7 @@ msgstr ""
 "Configurare l'ID dello spazio di test, l'ID utente e la chiave di "
 "autenticazione prima di impostare i webhook."
 
-#: payment.py:1090
+#: payment.py:1122
 msgid ""
 "Please configure Space ID, user ID, and authentication key before setting up "
 "webhooks."
@@ -351,12 +351,12 @@ msgstr ""
 "Configurare l'ID dello spazio, l'ID utente e la chiave di autenticazione "
 "prima di impostare i webhook."
 
-#: payment.py:1102 payment.py:1108
+#: payment.py:1134 payment.py:1140
 #, python-brace-format
 msgid "Failed to setup webhooks: {error}"
 msgstr "Impossibile impostare i webhook: {error}"
 
-#: payment.py:1116
+#: payment.py:1148
 msgid ""
 "Webhooks configured successfully! Transaction and refund updates will be "
 "received automatically."
@@ -364,29 +364,29 @@ msgstr ""
 "Webhook configurati correttamente! Gli aggiornamenti di transazioni e "
 "rimborsi verranno ricevuti automaticamente."
 
-#: payment.py:1121
+#: payment.py:1153
 msgid "Transaction webhook configured. Refund webhook was already set up."
 msgstr ""
 "Webhook delle transazioni configurato. Il webhook dei rimborsi era già "
 "presente."
 
-#: payment.py:1125
+#: payment.py:1157
 msgid "Refund webhook configured. Transaction webhook was already set up."
 msgstr ""
 "Webhook dei rimborsi configurato. Il webhook delle transazioni era già "
 "presente."
 
-#: payment.py:1128
+#: payment.py:1160
 msgid "Webhooks are already configured. No changes were needed."
 msgstr ""
 "I webhook sono già configurati. Non è stata necessaria alcuna modifica."
 
-#: payment.py:1199
+#: payment.py:1231
 #, python-brace-format
 msgid "Pay in {currency}"
 msgstr "Pagare in {currency}"
 
-#: payment.py:1212
+#: payment.py:1244
 #, python-brace-format
 msgid ""
 "You will be charged {alt_amount} instead of {base_amount} (exchange rate: 1 "
@@ -395,41 +395,41 @@ msgstr ""
 "Le verrà addebitato {alt_amount} anziché {base_amount} (tasso di cambio: 1 "
 "{base_currency} = {rate} {currency})."
 
-#: payment.py:1366 payment.py:2314
+#: payment.py:1398 payment.py:2347
 #, python-brace-format
 msgid "Installment {number} of {count} for order {code}"
 msgstr "Rata {number} di {count} per l'ordine {code}"
 
-#: payment.py:1371
+#: payment.py:1403
 #, python-brace-format
 msgid "Payment for order {code}"
 msgstr "Pagamento per l'ordine {code}"
 
-#: payment.py:1565
+#: payment.py:1597
 msgid "Failed to create payment. Please try again."
 msgstr "Impossibile creare il pagamento. Riprovare."
 
-#: payment.py:1574
+#: payment.py:1606
 msgid "Failed to redirect to payment page. Please try again."
 msgstr "Impossibile reindirizzare alla pagina di pagamento. Riprovare."
 
-#: payment.py:1619
+#: payment.py:1651
 msgid "Fee"
 msgstr "Commissione"
 
-#: payment.py:1643
+#: payment.py:1675
 msgid "Order Total"
 msgstr "Totale ordine"
 
-#: payment.py:1692
+#: payment.py:1724
 msgid "Payment service error. Please try again later."
 msgstr "Errore del servizio di pagamento. Riprovare più tardi."
 
-#: payment.py:1701 payment.py:1802 payment.py:1943
+#: payment.py:1733 payment.py:1834 payment.py:1975
 msgid "An unexpected error occurred. Please try again."
 msgstr "Si è verificato un errore imprevisto. Riprovare."
 
-#: payment.py:1729
+#: payment.py:1761
 #, python-brace-format
 msgid ""
 "You will be charged in {currency} (exchange rate: 1 {base_currency} = {rate} "
@@ -438,51 +438,42 @@ msgstr ""
 "L'addebito verrà effettuato in {currency} (tasso di cambio: 1 "
 "{base_currency} = {rate} {currency})."
 
-#: payment.py:1782 payment.py:1925
+#: payment.py:1814 payment.py:1957
 msgid "Payment processing failed. Please try again."
 msgstr "Elaborazione del pagamento non riuscita. Riprovare."
 
-#: payment.py:1890
+#: payment.py:1922
 msgid "Payment was successful but order confirmation failed."
 msgstr ""
 "Il pagamento è andato a buon fine, ma la conferma dell'ordine non è riuscita."
 
-#: payment.py:2213
+#: payment.py:2245
 msgid "An earlier payment attempt could not be checked."
 msgstr "Non è stato possibile verificare un tentativo di pagamento precedente."
 
-#: payment.py:2247
+#: payment.py:2279
 msgid "An earlier payment attempt is still being processed."
 msgstr "Un tentativo di pagamento precedente è ancora in elaborazione."
 
-#: payment.py:2293
+#: payment.py:2326
 msgid "No stored payment method is available for this plan."
 msgstr ""
 "Per questo piano rateale non è disponibile alcun metodo di pagamento salvato."
 
-#: payment.py:2365
+#: payment.py:2398
 msgid "PostFinance did not return a transaction reference."
 msgstr "PostFinance non ha restituito alcun riferimento di transazione."
 
-#: payment.py:2423
+#: payment.py:2459
 msgid "The payment was declined by PostFinance."
 msgstr "Il pagamento è stato rifiutato da PostFinance."
 
-#: payment.py:2438
-#, python-brace-format
-msgid "The payment did not complete (PostFinance state: {state})."
-msgstr "Il pagamento non è stato completato (stato PostFinance: {state})."
-
-#: payment.py:2441
-msgid "The payment did not complete."
-msgstr "Il pagamento non è stato completato."
-
-#: payment.py:2573
+#: payment.py:2602
 #, python-brace-format
 msgid "{payment_method} — charged as {alt_amount}"
 msgstr "{payment_method} — addebitato come {alt_amount}"
 
-#: payment.py:2612
+#: payment.py:2641
 #, python-brace-format
 msgid ""
 "The exchange rate used for this payment is unknown, so the refund amount "
@@ -493,7 +484,7 @@ msgstr ""
 "del rimborso non può essere convertito in {currency}. Effettuare il rimborso "
 "manualmente nella dashboard di PostFinance."
 
-#: payment.py:2692
+#: payment.py:2721
 #, python-brace-format
 msgid ""
 "This payment has already been fully refunded in {currency}. Please check the "
@@ -502,29 +493,29 @@ msgstr ""
 "Questo pagamento è già stato rimborsato per intero in {currency}. "
 "Controllare la dashboard di PostFinance."
 
-#: payment.py:2718
+#: payment.py:2748
 msgid "Transaction ID not found."
 msgstr "ID della transazione non trovato."
 
-#: payment.py:2728
+#: payment.py:2758
 #, python-brace-format
 msgid "Transaction cannot be refunded. Current state: {state}"
 msgstr "La transazione non può essere rimborsata. Stato attuale: {state}"
 
-#: payment.py:2793 payment.py:2846
+#: payment.py:2823 payment.py:2876
 msgid "Refund failed. Please try again."
 msgstr "Rimborso non riuscito. Riprovare."
 
-#: payment.py:3031
+#: payment.py:3061
 msgid "PostFinance (production space)"
 msgstr "PostFinance (spazio di produzione)"
 
-#: payment.py:3058
+#: payment.py:3088
 #, python-brace-format
 msgid "{name} (production space)"
 msgstr "{name} (spazio di produzione)"
 
-#: payment.py:3067
+#: payment.py:3097
 msgid ""
 "This payment method uses your production PostFinance space. Payments are "
 "real and will be charged even though the event is in test mode."

@@ -2220,8 +2220,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         * ``(True, info, None)`` — it settled. Adopt that transaction instead of
           creating another one; the money is already in.
         * ``(True, None, reason)`` — it is neither settled nor dead yet, or could
-          not be checked. Charging now risks doubling, so report a failure and let
-          the next scheduled run look again.
+          not be checked. Charging now risks doubling, so report a failure; a
+          later retry from the control panel or the API looks again.
         * ``(False, None, None)`` — nothing in the way; charge normally.
         """
         previous = self._previous_charge_attempt(payment, installment)
@@ -2281,7 +2281,7 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
     def execute_installment(
         self, plan: Any, installment: Any, payment: OrderPayment
-    ) -> bool:
+    ) -> bool | None:
         """
         Charge a scheduled installment against the plan's stored token.
 
@@ -2291,15 +2291,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         turns into a grace period and a notification.
 
         ``payment`` is an ``OrderPayment`` in state ``created`` that pretix
-        has already built for this installment. It does not need saving —
-        pretix persists ``info`` when it confirms or fails the payment — but
-        what goes in it decides what can be done with the charge afterwards:
-        without the transaction reference the payment cannot be refunded.
+        has already built for this installment. What goes in its ``info``
+        decides what can be done with the charge afterwards: without the
+        transaction reference the payment cannot be refunded, so it is saved
+        before the money moves rather than left to pretix to persist after.
 
         :param plan: The InstallmentPlan holding the token to charge
         :param installment: The ScheduledInstallment to pay
         :param payment: The OrderPayment to record this charge against
-        :return: True if the charge succeeded
+        :return: True if the charge succeeded, None if PostFinance has not
+            decided yet, False if it failed
         """
         # Marks the payment as an automatic charge rather than something the
         # customer paid on the payment page. `store_installment_token` reads
@@ -2405,10 +2406,11 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     TOKEN_ID_KEY: token_id,
                 }
             )
-            # Recorded before the charge is made: if the call dies after the
+            # Saved before the charge is made: if the process dies after the
             # money moved, the payment still names the transaction to
-            # reconcile and refund against.
+            # reconcile and refund against, and the next attempt finds it.
             payment.info_data = info
+            payment.save(update_fields=["info"])
 
             logger.info(
                 "Created installment transaction %s for installment %s of order %s "
@@ -2458,23 +2460,16 @@ class PostFinancePaymentProvider(BasePaymentProvider):
                     info,
                 )
 
-            logger.warning(
-                "Installment %s for order %s is pending or incomplete "
-                "(PostFinance charge state: %s)",
+            # Not decided yet. Reporting it as a decline would have the customer
+            # pay again while this charge may still go through; pretix keeps the
+            # payment pending instead, and the transaction webhook settles it.
+            logger.info(
+                "Installment %s for order %s is pending (PostFinance charge state: %s)",
                 installment.pk,
                 plan.order.code,
                 charge_state,
             )
-            return self._fail_installment(
-                installment,
-                payment,
-                str(
-                    _("The payment did not complete (PostFinance state: {state}).")
-                ).format(state=charge_state.value)
-                if charge_state
-                else str(_("The payment did not complete.")),
-                info,
-            )
+            return None
 
         except PaymentException as e:
             logger.error(
