@@ -90,6 +90,8 @@ def postfinance(monkeypatch):
         # When set, the charge call dies after the money has moved -- the
         # transaction exists and is settled, but we never hear the answer.
         lose_response=False,
+        # When set, PostFinance has not decided the charge by the time it answers.
+        pending=False,
         transaction=fulfilled_transaction(),
     )
 
@@ -112,6 +114,17 @@ def postfinance(monkeypatch):
     def process_with_token(self, tid):
         if api.lose_response:
             raise PostFinanceError("gateway timeout", status_code=504)
+        if api.pending:
+            return SimpleNamespace(
+                state=ChargeState.PENDING,
+                failure_reason=None,
+                transaction=SimpleNamespace(
+                    id=tid,
+                    state=TransactionState.PROCESSING,
+                    payment_connector_configuration=None,
+                    created_on=None,
+                ),
+            )
         if api.decline is not None:
             return SimpleNamespace(
                 state=ChargeState.FAILED,
@@ -455,6 +468,45 @@ def test_a_declined_charge_leaves_a_failed_payment(
     plan.refresh_from_db()
     assert plan.status == InstallmentPlan.STATUS_ACTIVE
     assert plan.grace_period_end is not None
+
+
+@pytest.mark.django_db
+def test_an_undecided_charge_waits_for_the_webhook(
+    installments_event, installments_order, pay_first_installment, postfinance, monkeypatch
+):
+    """
+    A charge PostFinance has not decided yet is no decline: the customer is
+    not told to pay again, and the transaction webhook settles it later.
+    """
+    plan = create_installment_plan(installments_order, "postfinance", 3)
+    pay_first_installment(installments_event, first_payment_of(plan))
+
+    postfinance.pending = True
+    assert process_single_installment(due(plan, 2)) is None
+
+    installment = due(plan, 2)
+    assert installment.state == ScheduledInstallment.STATE_PENDING
+    assert installment.payment.state == OrderPayment.PAYMENT_STATE_PENDING
+    plan.refresh_from_db()
+    assert plan.grace_period_end is None
+
+    monkeypatch.setattr(
+        "pretix_postfinance.views.PostFinanceClient.get_transaction",
+        lambda self, tid: fulfilled_transaction(),
+    )
+    monkeypatch.setattr(
+        "pretix_postfinance.views._client_for_entity",
+        lambda entity, space_id, entity_id, kind: (
+            PostFinancePaymentProvider(installments_event)._get_client(),
+            "ok",
+        ),
+    )
+    with scopes_disabled():
+        _process_transaction_webhook(installment.payment.info_data["transaction_id"], 12345)
+
+    installment = due(plan, 2)
+    assert installment.state == ScheduledInstallment.STATE_PAID
+    assert installment.payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED
 
 
 @pytest.mark.django_db
