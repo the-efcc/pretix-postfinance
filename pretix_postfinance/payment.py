@@ -2220,8 +2220,8 @@ class PostFinancePaymentProvider(BasePaymentProvider):
         * ``(True, info, None)`` — it settled. Adopt that transaction instead of
           creating another one; the money is already in.
         * ``(True, None, reason)`` — it is neither settled nor dead yet, or could
-          not be checked. Charging now risks doubling, so report a failure and let
-          the next scheduled run look again.
+          not be checked. Charging now risks doubling, so report a failure; a
+          later retry from the control panel or the API looks again.
         * ``(False, None, None)`` — nothing in the way; charge normally.
         """
         previous = self._previous_charge_attempt(payment, installment)
