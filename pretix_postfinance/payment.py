@@ -2843,11 +2843,12 @@ class PostFinancePaymentProvider(BasePaymentProvider):
 
             # A refund PostFinance already reports as successful is completed
             # here rather than left to the webhook, as the webhook would on
-            # the same state. The webhook finds a refund by the ID saved just
-            # above, so one PostFinance sends before that save finds nothing
-            # and is never retried: the refund would otherwise stay in transit
-            # for good. Any other state stays in transit for the webhook to
-            # settle; a refund still pending must not be marked done.
+            # the same state. A webhook PostFinance sent before the save just
+            # above may have settled the refund already, and that save put it
+            # back in transit; the webhook is not sent again, so the refund
+            # would otherwise stay there for good. Any other state stays in
+            # transit for the webhook to settle; a refund still pending must
+            # not be marked done.
             if refund_state == RefundState.SUCCESSFUL.value:
                 mark_refund_done(refund)
 

@@ -463,6 +463,121 @@ class TestWebhookRefund:
             assert refund.info_data.get("error_code") == "SERVER_ERROR"
 
 
+EXTERNAL_ID = "pretix-dummy-dummy-FOOBAR-R-1"
+
+
+def _unconfirmed_refund(order):
+    """A refund sent to PostFinance that never answered (see execute_refund())."""
+    with scopes_disabled():
+        payment = order.payments.create(
+            provider="postfinance",
+            amount=order.total,
+            info=json.dumps({"transaction_id": 123456}),
+            state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        )
+        return order.refunds.create(
+            provider="postfinance",
+            amount=order.total,
+            payment=payment,
+            state=OrderRefund.REFUND_STATE_CREATED,
+            info=json.dumps({"external_id": EXTERNAL_ID, "error": "Read timed out"}),
+        )
+
+
+def _post_refund_webhook(client, refund_id=789012):
+    payload = get_webhook_payload(refund_id)
+    payload["listenerEntityId"] = REFUND_ENTITY_ID
+    return client.post(
+        "/_postfinance/webhook/",
+        json.dumps(payload),
+        content_type="application/json",
+        HTTP_X_SIGNATURE="valid-signature",
+    )
+
+
+class TestWebhookUnconfirmedRefund:
+    @pytest.mark.django_db
+    def test_a_refund_postfinance_never_confirmed_is_found_by_its_external_id(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        _, order = webhook_env
+        refund = _unconfirmed_refund(order)
+        pf_refund = MagicMock(external_id=EXTERNAL_ID)
+        pf_refund.state.value = "SUCCESSFUL"
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_refund", lambda self, rid: pf_refund
+        )
+
+        response = _post_refund_webhook(client)
+
+        assert response.status_code == 200
+        with scopes_disabled():
+            refund.refresh_from_db()
+            assert refund.state == OrderRefund.REFUND_STATE_DONE
+            assert refund.info_data["refund_id"] == 789012
+
+    @pytest.mark.django_db
+    def test_a_refund_with_another_external_id_is_left_alone(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        _, order = webhook_env
+        refund = _unconfirmed_refund(order)
+        pf_refund = MagicMock(external_id="created-in-the-postfinance-dashboard")
+        pf_refund.state.value = "SUCCESSFUL"
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_refund", lambda self, rid: pf_refund
+        )
+
+        response = _post_refund_webhook(client)
+
+        assert response.status_code == 200
+        with scopes_disabled():
+            refund.refresh_from_db()
+            assert refund.state == OrderRefund.REFUND_STATE_CREATED
+            assert "refund_id" not in refund.info_data
+
+    @pytest.mark.parametrize(
+        ("error", "status"),
+        [
+            (PostFinanceError("Read timed out", connection_error=True), 502),
+            (PostFinanceError("Server error", status_code=503), 502),
+            # Not a refund at all: a transaction webhook of unknown type.
+            (PostFinanceError("Not found", status_code=404), 200),
+        ],
+        ids=["timeout", "server-error", "no-such-refund"],
+    )
+    @pytest.mark.django_db
+    def test_postfinance_failing_to_say_whose_refund_it_is(
+        self, webhook_env, client, monkeypatch, valid_signature, error, status
+    ):
+        """Retried only if PostFinance may answer next time."""
+        _, order = webhook_env
+        refund = _unconfirmed_refund(order)
+
+        def get_refund(self, rid):
+            raise error
+
+        monkeypatch.setattr("pretix_postfinance.views.PostFinanceClient.get_refund", get_refund)
+
+        response = _post_refund_webhook(client)
+
+        assert response.status_code == status
+        with scopes_disabled():
+            refund.refresh_from_db()
+            assert refund.state == OrderRefund.REFUND_STATE_CREATED
+
+    @pytest.mark.django_db
+    def test_postfinance_is_not_asked_while_no_refund_waits_for_an_answer(
+        self, webhook_env, client, monkeypatch, valid_signature
+    ):
+        monkeypatch.setattr(
+            "pretix_postfinance.views.PostFinanceClient.get_refund",
+            lambda self, rid: pytest.fail("no refund to match, nothing to fetch"),
+        )
+
+        assert _post_refund_webhook(client).status_code == 200
+
+
 class TestWebhookErrorHandling:
     @pytest.mark.django_db
     def test_transaction_api_error_returns_502(

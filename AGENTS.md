@@ -34,9 +34,12 @@ PostFinance Checkout payment plugin for pretix.
    carried out without saying so (timeout, broken connection, 5xx) is sent once
    more under the same external ID, which PostFinance answers with the refund
    it already created. If that does not settle it either, the refund stays
-   `created` for the admin to check, never `failed`: pretix would free a failed
-   refund's amount, and refunding it again pays the customer twice.
-3. Webhook receives refund state updates -> `_process_refund_state()`
+   `created`, never `failed`: pretix would free a failed refund's amount, and
+   refunding it again pays the customer twice.
+3. Webhook receives refund state updates -> `_process_refund_webhook()`. A
+   refund with no `refund_id` yet is found by the `external_id` saved before
+   it was sent (`_find_unconfirmed_refund()`); until a webhook comes, the
+   admin is told to check PostFinance.
 4. Refund history tracked in `info_data['refund_history']`
 
 ## Development Commands
