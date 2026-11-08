@@ -356,7 +356,7 @@ def _derived_space_id(obj: Any) -> str | None:
 
 
 def _find_entity(
-    queryset: QuerySet, id_keys: tuple[str, ...], entity_id: int, space_id: int
+    queryset: QuerySet, id_keys: tuple[str, ...], entity_id: int | str, space_id: int
 ) -> Any | None:
     """
     Find the payment or refund an incoming webhook is about.
@@ -600,6 +600,36 @@ def _process_transaction_webhook(entity_id: int, space_id: int) -> tuple[str, bo
     return (WEBHOOK_STATUS_OK, False)
 
 
+def _find_unconfirmed_refund(entity_id: int, space_id: int) -> Any | None:
+    """
+    Find a refund PostFinance created but never confirmed to us.
+
+    `execute_refund()` saves a refund's external ID before sending it, and the
+    refund ID only from PostFinance's answer. When that answer never came
+    (timeout, broken connection, 5xx), or this webhook got here first, the
+    refund ID matches nothing and only the external ID tells which refund it
+    is. Finding that out takes a call to PostFinance, so it is only made while
+    a refund is waiting for one.
+
+    Raises PostFinanceError if PostFinance could not tell.
+    """
+    unconfirmed = OrderRefund.objects.filter(
+        provider__in=PROVIDER_IDENTIFIERS,
+        state=OrderRefund.REFUND_STATE_CREATED,
+        info__icontains='"external_id"',
+    ).exclude(info__icontains='"refund_id"')
+    if not unconfirmed.exists():
+        return None
+
+    client = _get_client_for_space(space_id)
+    if client is None:
+        return None
+    external_id = client.get_refund(int(entity_id)).external_id
+    if not external_id:
+        return None
+    return _find_entity(unconfirmed, ("external_id",), external_id, space_id)
+
+
 def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | None]:
     """
     Process a refund state update from webhook.
@@ -621,6 +651,20 @@ def _process_refund_webhook(entity_id: int, space_id: int) -> tuple[str, bool | 
         entity_id,
         space_id,
     )
+
+    if not refund:
+        try:
+            refund = _find_unconfirmed_refund(entity_id, space_id)
+        except PostFinanceError as e:
+            if e.connection_error or (e.status_code or 0) >= 500:
+                logger.error(
+                    "PostFinance webhook: could not fetch refund %s to match it: %s",
+                    entity_id,
+                    e,
+                )
+                return (WEBHOOK_STATUS_API_ERROR, None)
+            # PostFinance has no such refund: a webhook of unknown type that
+            # was about a transaction.
 
     if not refund:
         # Entity not found in our database - this webhook isn't for us
